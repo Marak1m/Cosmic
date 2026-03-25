@@ -1,0 +1,34 @@
+.env
+.env.*
+!.env.example
+
+.idea/
+
+__pycache__/
+*.pyc
+
+rag_pdf/db
+
+# Node / web apps
+node_modules/
+apps/**/node_modules/
+apps/**/.env
+
+# Local virtual envs (do not commit)
+venvs/
+auto/
+crewai/
+
+# Local caches / artifacts
+.cache/
+data/**
+!data/README.md
+
+# Executables / installers
+*.exe
+*.msi
+*.dmg
+*.pkg
+
+# Claude Code internals
+.claude/

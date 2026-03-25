@@ -1,0 +1,288 @@
+Abstract—We present a novel multi-agent coordination frame-
+work that builds upon and extends the AutoGen groupchat
+paradigm, enabling more cohesive and contextually rich collabo-
+ration among multiple Large Language Model (LLM) agents.
+Our approach leverages a leader agent that guides the dis-
+cussion between the different agents and ultimately terminates
+the groupchat session with a finalized solution after all the
+agents contribute to create a solution. By maintaining a shared,
+rolling conversation buffer visible to all agents, the framework
+ensures continuity and reduces redundant efforts. Evaluating
+this implementation with current existing frameworks shows an
+increase in performance in all tasks and the increase is more
+substantial in tasks which require coordination and collaboration.
+Index Terms—Multi-agent coordination, collaborative AI,
+shared memory, leader-driven termination, agent communication,
+AutoGen
+I. INTRODUCTION
+LLM agent frameworks have become the new method of
+extracting the best performance out of LLM’s and specializing
+them in one field and using them to solve problems. However,
+achieving effective coordination and communication between
+agents remains a critical challenge. Traditional frameworks
+often rely on rigid hierarchies or limited message passing
+protocols, making it difficult for agents to maintain continuity,
+reference prior states, or seamlessly integrate each other’s
+contributions.
+In contrast, human teams often engage in dynamic, context-
+rich discussions that continuously reference recent exchanges.
+Inspired by this model, we build upon the AutoGen groupchat
+paradigm to create a more adaptive and context-aware coordi-
+nation framework. Our approach introduces a leader agent who
+orchestrates the overall process, ensures that all participants
+have the necessary context, and terminates the conversation
+once a well-formed solution emerges.
+Central to our framework is a shared conversational memory
+that stores the last N messages, visible to all agents. This
+structure allows agents to maintain situational awareness,
+recall recent proposals, and reduce the need to restate known
+facts. Instead of predetermined turn orders, the current speaker
+dynamically selects the next agent to speak, enabling flexible
+and context-driven division of labor.
+Our contributions are as follows:
+• Leader-Guided Collaboration: A leader agent initiates
+the task, monitors progress, and determines when a
+satisfactory solution is reached.
+• Shared Rolling Memory: All agents see the last N
+messages, improving continuity and coherence in tasks
+that require integrated reasoning.
+• Dynamic Speaker Invocation: The current speaker se-
+lects the next agent to contribute, fostering adaptive and
+situational turn-taking.
+• Empirical Gains: We show that this extended AutoGen-
+based framework outperforms conventional multi-agent
+setups on coordination-intensive tasks, especially those
+requiring cohesive and coupled reasoning steps. We also
+identify a sweet spot of four to six agents as optimal for
+balancing computation time and solution quality.
+The remainder of this paper is organized as follows: Section
+II surveys related work. Section IV formulates the class
+of tasks addressed. Section III outlines our methodology,
+including the leader-based architecture and dynamic speaker
+invocation mechanism.
+II. RELATED WORK
+Previous multi-agent frameworks often depend on con-
+strained message passing or limited state-sharing protocols.
+CrewAI uses sequential and hierarchal ways of making LLM
+agents which has leads to minimal coordination between the
+agents. The default groupchat in autogen randomly selects
+the next speaker and there is no proper termination condition
+specified which does lead to collaboration but its not that
+effective and efficient as most of the times the groupchat leads
+to an improper solution and termination.
+All the current agentic framework appriaches do not empha-
+size a human-like, context-rich chat environment that main-
+tains a direct window into recent interactions. Furthermore,
+these approaches rarely implement a formal termination mech-
+anism controlled by a leader agent.
+Our work differs by extending the AutoGen groupchat
+paradigm to include:
+• A leader agent who initiates and terminates the conver-
+sation.
+• A shared rolling memory accessible to all agents, improv-
+ing continuity.
+• A dynamic invocation mechanism for selecting the next
+speaker, mimicking human team brainstorming sessions.
+These enhancements allow for richer coordination strate-
+gies, making it possible to handle tasks that require cohesive
+sequencing of reasoning steps and tightly coupled integration
+of different agents’ outputs.
+III. METHODOLOGY
+A. Architectural Overview
+Our framework extends the AutoGen groupchat by introduc-
+ing a leader agent and dynamic turn-taking. Figure ?? (to be
+included) depicts the high-level architecture. The leader agent
+receives the initial task, places it in the shared memory, and
+initiates the reasoning process. Each agent has access to this
+memory, and infers what to do next based on the conversation,
+and writes back their contributions.
+B. Leader Agent
+The leader agent plays a crucial role: it sets the collaborative
+tone, periodically checks the state of the conversation, and
+determines when a final solution is reached. By providing
+a termination criterion, we avoid unbounded discussions and
+ensure that the system gives a definitive answer.
+C. Shared Memory for Context
+The shared memory M serves as a rolling transcript of the
+last N turns. Agents leverage this memory to maintain context,
+reducing redundant questions or re-derivations. Through con-
+tinuous visibility of recent exchanges, agents can directly refer
+to previous findings or constraints, leading to more integrated
+and coherent solutions. After adding the recent memory
+D. Dynamic Speaker Invocation
+Unlike fixed schedules, the current speaker in our frame-
+work selects the next speaker dynamically. This invocation
+mechanism allows for flexible role allocation. For instance,
+if an agent specialized in logical reasoning identifies the
+need for numerical validation, it can invoke a mathematically
+inclined agent next. Over time, this chain of invocations
+weaves together different forms of expertise in a context-
+responsive manner.
+E. Task Execution and Termination
+The conversation continues iteratively, with agents propos-
+ing solutions, refining approaches, and verifying correctness.
+Once the leader agent deems the solution sufficient, it posts
+the final answer and a termination signal on M which the user
+proxy agent sees and terminates the groupchat. The system
+then stops processing further messages and returns the final
+solution, achieving a clean and interpretable end state.
+IV. PROBLEM FORMULATION FOR FRAMEWORK
+COMPARISON
+We consider multiagent problem solving scenarios in which
+a set of agents, each possessing different expertise or compu-
+tational abilities, collaborate to produce a final solution. Let
+there be m agents {A1, A2, . . . , Am} one designated leader
+agent and one user proxy L. All agents read from and write
+to a shared memory buffer M that stores the last N messages.
+We designed three main types of tasks on which we
+compared the different agentic frameworks to test which one
+produced the best results.
+• Normal tasks with no collaboration
+• Tasks which require slight collaboration
+• Tasks where coordination and collaboration is essential.
+Since our framework is particularly beneficial for:
+• Cohesive Tasks: Tasks that require a stepwise accumu-
+lation of partial solutions, where each subsequent step
+relies on previously established information.
+• Coupled Tasks: Tasks that demand the integration of the
+specialized knowledge of multiple agents to arrive at a
+coherent final answer.
+We made a separate section for them to test the efficacy of
+our framework in these complicated tasks.
+All the tasks used for comparing the frameworks are listed
+below - :
+V. FINDING THE OPTIMUM AMOUNT OF AGENTS
+In principle, one can scale the number of agents in
+a collaborative problem-solving setting indefinitely. Many
+tasks—including complex business decision-making, strategic
+planning, and even general-purpose language tasks such as
+summarization—could, in theory, benefit from an increased
+breadth of expertise and perspectives. However, scaling the
+number of agents comes with practical trade-offs. As the num-
+ber of agents grows, the volume of inter-agent communication
+also rises, leading to significantly increased computation time
+and longer convergence to a final solution. Beyond a certain
+point, the added complexity introduces diminishing returns or
+even degrades performance.
+To identify an optimal team size for our leader-guided,
+context-rich coordination framework, we conducted empirical
+studies on two representative tasks:
+A Real-World Business Problem: This involved agents
+proposing and refining various strategies to achieve a specified
+business objective. A Summarization Task: Agents worked
+together to produce a coherent summary of a long document,
+drawing on their collective reasoning to ensure completeness,
+accuracy, and readability. Our findings indicate that a team
+size of approximately five agents achieves a balance that
+mirrors human team dynamics. With five agents, we observed
+a productive equilibrium between diversity of thought and
+manageable communication overhead. Specifically, in the sum-
+marization task, increasing the number of agents beyond five
+yielded negligible improvements in output quality, while sub-
+stantially increasing the number of messages exchanged and
+the total solution time. In fact, overcommunication sometimes
+diluted the clarity of the final summary, introducing extraneous
+details or inconsistencies.
+A similar pattern emerged in the business problem scenario.
+Once we exceeded the five-agent threshold, the conversation
+became saturated with too many ideas and strategies. Instead
+of converging smoothly on a well-reasoned solution, the
+discussion often splintered into parallel threads of thought,
+making it harder for the leader agent to identify the optimal
+path. This excess of unstructured information led to decision
+fatigue among the agents and ultimately hindered timely
+consensus.
+In both cases, teams of around five agents provided the right
+mix of domain expertise, ensuring that each agent’s contri-
+butions were recognized and integrated without the process
+becoming unwieldy. This result is consistent with research
+in human organizational behavior, which often recommends
+small, focused teams to achieve high-quality outcomes effi-
+ciently.
+In summary, while our framework is theoretically scal-
+able, empirical evidence suggests that more is not always
+better. Maintaining a moderate number of agents—around
+five—maximizes both the speed and quality of decision-
+making, allowing for efficient communication and improved
+overall performance.
+VI. BENCHMARKING AND COMPARING DIFFERENT
+FRAMEWORKS
+After finalizing our set of evaluation tasks, we bench-
+marked several frameworks—including CrewAI Sequential,
+CrewAI Hierarchical, our proposed framework, and Ope-
+nAISwarm—on a system equipped with an H100 SXM GPU,
+using the LLM models Qwen2.5:72B and Nemotron.
+For relatively straightforward tasks, our framework demon-
+strated slightly improved performance compared to the other
+tested systems. This marginal gain was evident in both solution
+quality and completion time.
+As the complexity of the tasks increased to scenarios
+requiring moderate coordination, our approach distinctly out-
+performed the alternatives. In addition to consistently finding
+correct or near-optimal solutions, our framework achieved
+these results more efficiently. Notably, there were instances
+where other frameworks were unable to complete certain coor-
+dination tasks at all, underscoring the importance of fostering
+genuine collaborative dynamics among agents.
+In tasks where complex, active coordination was essen-
+tial—such as those necessitating iterative refinement and in-
+tegrated contributions from multiple agents—our framework
+consistently met or exceeded expectations. In contrast, the
+comparison frameworks struggled or outright failed to pro-
+duce solutions, highlighting the critical role of well-designed
+interaction protocols and shared context for multi-agent coop-
+eration.
+Table [??] provides detailed performance and runtime met-
+rics for all evaluated tasks across the tested frameworks.
+TABLE I
+PERFORMANCE COMPARISON ACROSS FRAMEWORKS
+Task Framework Time Taken Grade
+Mathematical Problems CrewAI Hierarchical 8m 33.1s 0
+Mathematical Problems CrewAI Sequential 10m 0
+Mathematical Problems AutoGen 3m 27s 100
+Multilingual Translation CrewAI Hierarchical 3m 22.6s 51
+Multilingual Translation CrewAI Sequential 3m 20s 95
+Multilingual Translation AutoGen 27s 95
+Short Story Generation CrewAI Hierarchical 8m 3s 88
+Short Story Generation CrewAI Sequential 7m 2s 85
+Short Story Generation AutoGen 4m 53s 94
+A. Multilingual Translation Task:
+In this challenge, each agent specialized in translating from
+a single distinct language into English. The source text corpus
+contained words interspersed from all four target languages.
+Unlike sequential or strictly hierarchical frameworks, our
+system enabled these language experts to discuss and negotiate
+translations collaboratively. By leveraging shared context and
+iterative feedback, the agents were able to produce a more
+accurate and coherent translation. Other frameworks, con-
+strained by their unidirectional or strictly pipelined message
+flow, struggled to maintain consistency and clarity, resulting
+in lower-quality outputs.
+B. Story Writing Task:
+We tasked the agents with composing a 2,000-word
+adventure-thriller story. Each agent served a distinct creative
+function—such as plot design, character development, world
+building, and theme definition. While the other frameworks
+could only elaborate on the initial agent’s concept with limited
+opportunities for revision, our approach allowed agents to
+continually refine and improve the narrative. By discussing
+and revisiting earlier decisions until a consensus was reached,
+our framework produced stories with higher overall quality
+scores.
+C. Mathematics Problem Task:
+In a complex mathematics problem requiring coordinated
+solutions, each agent specialized in a different domain (e.g.,
+calculus or algebra). The agents were tasked with collectively
+determining a single variable value. Our framework, with its
+free-flowing collaboration and shared memory, successfully
+integrated each agent’s partial solution into a coherent whole.
+Remarkably, the other frameworks failed to converge on a
+final answer. This result not only emphasizes the necessity
+of genuine, bidirectional communication for problem-solving
+but also demonstrates the versatility of our framework, which
+can handle tasks that, at first glance, seem well-suited to a
+purely sequential approach.
+In sum, the benchmarking results clearly indicate that our
+leader-driven, context-rich framework provides meaningful
+advantages over conventional approaches in tasks requiring
+varying degrees of collaboration and coordination

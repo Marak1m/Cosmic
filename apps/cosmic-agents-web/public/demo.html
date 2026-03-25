@@ -1,0 +1,99 @@
+﻿<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cosmic Agents Demo</title>
+    <meta
+      name="description"
+      content="Run the Cosmic Agents multi-agent demo with live speaker selection and bounded shared memory."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=Space+Grotesk:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="landing.css" />
+    <link rel="stylesheet" href="demo.css" />
+  </head>
+  <body>
+    <div class="space" aria-hidden="true">
+      <div class="stars"></div>
+      <div class="nebula"></div>
+      <div class="gridglow"></div>
+    </div>
+
+    <header class="top-nav demo-top-nav">
+      <a class="logo" href="/" aria-label="Cosmic home">cosmic</a>
+      <div class="demo-actions">
+        <a class="btn secondary small" href="/">Home</a>
+        <div class="status-pill" id="status-pill">Idle</div>
+      </div>
+    </header>
+
+    <main class="demo-main">
+      <section class="hero demo-hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Realtime demo</p>
+          <h1>Launch a crew and watch them converge.</h1>
+          <p class="lead">
+            The planner spins up to five specialists plus a Leader. A custom
+            speaker selector chooses who speaks next while memory stays shared
+            and bounded.
+          </p>
+        </div>
+
+        <form class="prompt-form" id="prompt-form">
+          <label for="prompt-input" class="mono">Your mission prompt</label>
+          <textarea
+            id="prompt-input"
+            name="prompt"
+            placeholder="Describe the task or scenario you want the agents to solve..."
+            rows="5"
+            required
+          ></textarea>
+          <button type="submit" class="btn primary" id="run-btn">
+            Launch the crew
+          </button>
+          <p class="helper-text mono">
+            Tip: try prompts like "resource scheduling with constraints", "write a short story", or "research and summarize".
+          </p>
+        </form>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Agent Crew</h2>
+          <span class="panel-note mono" id="run-id">Waiting for launch</span>
+        </div>
+        <div class="agent-grid" id="agent-grid"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Live Dialogue</h2>
+          <span class="panel-note mono" id="live-status">No conversation yet</span>
+        </div>
+        <div class="chat-feed" id="chat-feed"></div>
+      </section>
+
+      <section class="panel output-panel">
+        <div class="panel-header">
+          <h2>Final Output</h2>
+          <span class="panel-note mono" id="final-status">Pending</span>
+        </div>
+        <div class="final-output" id="final-output">
+          <p class="mono">Run a mission to see the Leader's finalized response here.</p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="demo-footer">
+      <p class="mono">cosmic-agents.com &mdash; realtime multi-agent workflows</p>
+    </footer>
+
+    <script src="app.js"></script>
+  </body>
+</html>
+
