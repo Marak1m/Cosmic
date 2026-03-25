@@ -15,6 +15,12 @@ let pendingClarifyRunId = null;
 let clarifyOverlay = null;
 const messageNodesById = new Map();
 
+// ── Communication graph state ──────────────────────────────
+const graphNodes = new Map(); // agentName → DOM element
+let graphSvg = null;
+let prevSpeaker = null;
+let graphLeaderName = null;
+
 const presetPrompt = new URLSearchParams(window.location.search).get("prompt");
 if (presetPrompt && promptInput) {
   promptInput.value = presetPrompt;
@@ -57,6 +63,21 @@ function resetUI() {
   hideClarifications();
   if (promptInput) promptInput.disabled = false;
   messageNodesById.clear();
+  // reset graph
+  graphNodes.clear();
+  graphSvg = null;
+  prevSpeaker = null;
+  graphLeaderName = null;
+  const graphEl = document.getElementById("agent-graph");
+  if (graphEl) {
+    Array.from(graphEl.children).forEach((c) => {
+      if (!c.classList.contains("graph-lines")) c.remove();
+    });
+    const svg = graphEl.querySelector(".graph-lines");
+    if (svg) svg.innerHTML = "";
+  }
+  const graphStatus = document.getElementById("graph-status");
+  if (graphStatus) graphStatus.textContent = "Waiting for crew...";
 }
 
 function renderAgents(leader, agents) {
@@ -99,6 +120,8 @@ function renderAgents(leader, agents) {
   agents.forEach((agent) => {
     agentGrid.appendChild(buildCard(agent.name, agent.role, agent.tools || []));
   });
+
+  layoutGraphNodes(leader, agents);
 }
 
 function ensureMessageNode(id, name) {
@@ -171,10 +194,20 @@ function setMessageText(id, name, content) {
 
 function setActiveAgent(name) {
   if (activeAgent === name) return;
+
+  // draw transfer arc before updating activeAgent
+  if (prevSpeaker && prevSpeaker !== name) {
+    drawTransfer(prevSpeaker, name);
+  }
+  prevSpeaker = name;
   activeAgent = name;
 
   document.querySelectorAll(".agent-card").forEach((card) => {
     card.classList.toggle("active", card.dataset.agent === name);
+  });
+
+  document.querySelectorAll(".graph-node").forEach((node) => {
+    node.classList.toggle("active", node.dataset.agent === name);
   });
 }
 
@@ -393,5 +426,131 @@ promptForm.addEventListener("submit", (event) => {
     })
   );
 });
+
+// ── Communication graph ────────────────────────────────────
+
+function layoutGraphNodes(leader, agents) {
+  const graphEl = document.getElementById("agent-graph");
+  if (!graphEl) return;
+
+  graphNodes.clear();
+  graphLeaderName = leader ? leader.name : null;
+
+  // remove old nodes but keep the SVG element
+  Array.from(graphEl.children).forEach((c) => {
+    if (!c.classList.contains("graph-lines")) c.remove();
+  });
+
+  graphSvg = graphEl.querySelector(".graph-lines");
+  if (graphSvg) graphSvg.innerHTML = "";
+
+  const all = [];
+  if (leader) all.push(leader);
+  agents.forEach((a) => all.push(a));
+  if (all.length === 0) return;
+
+  all.forEach((agent, i) => {
+    const angle = (i / all.length) * 2 * Math.PI - Math.PI / 2;
+    const px = 50 + 38 * Math.cos(angle);
+    const py = 50 + 42 * Math.sin(angle);
+
+    const node = document.createElement("div");
+    node.className =
+      "graph-node" +
+      (leader && agent.name === leader.name ? " leader" : "");
+    node.dataset.agent = agent.name;
+    node.style.setProperty("--x", px + "%");
+    node.style.setProperty("--y", py + "%");
+    node.textContent = agent.name.replace(/_/g, " ");
+    graphEl.appendChild(node);
+    graphNodes.set(agent.name, node);
+  });
+
+  const statusEl = document.getElementById("graph-status");
+  if (statusEl) statusEl.textContent = all.length + " agents active";
+}
+
+function drawTransfer(fromName, toName) {
+  if (!graphSvg || !fromName || !toName || fromName === toName) return;
+  const fromEl = graphNodes.get(fromName);
+  const toEl = graphNodes.get(toName);
+  if (!fromEl || !toEl) return;
+
+  const stageRect = graphSvg.getBoundingClientRect();
+  if (!stageRect.width) return;
+
+  const fromRect = fromEl.getBoundingClientRect();
+  const toRect = toEl.getBoundingClientRect();
+
+  const x1 = fromRect.left - stageRect.left + fromRect.width / 2;
+  const y1 = fromRect.top - stageRect.top + fromRect.height / 2;
+  const x2 = toRect.left - stageRect.left + toRect.width / 2;
+  const y2 = toRect.top - stageRect.top + toRect.height / 2;
+
+  graphSvg.setAttribute(
+    "viewBox",
+    "0 0 " + stageRect.width + " " + stageRect.height
+  );
+
+  // curved bezier — offset perpendicular to the midpoint
+  const mx = (x1 + x2) / 2;
+  const my = (y1 + y2) / 2;
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const cpx = mx - dy * 0.3;
+  const cpy = my + dx * 0.3;
+
+  const isLeader = fromName === graphLeaderName;
+
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M " + x1 + " " + y1 + " Q " + cpx + " " + cpy + " " + x2 + " " + y2);
+  path.setAttribute("data-leader", String(isLeader));
+  path.classList.add("graph-arrow");
+  graphSvg.appendChild(path);
+
+  const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+  dot.setAttribute("r", "5");
+  dot.setAttribute("data-leader", String(isLeader));
+  dot.classList.add("graph-dot");
+  graphSvg.appendChild(dot);
+
+  const len = path.getTotalLength();
+  if (!len) { path.remove(); dot.remove(); return; }
+
+  path.style.strokeDasharray = len;
+  path.style.strokeDashoffset = len;
+
+  let t0 = null;
+  const dur = 680;
+
+  function easeInOut(p) {
+    return p < 0.5 ? 2 * p * p : -1 + (4 - 2 * p) * p;
+  }
+
+  function tick(ts) {
+    if (!t0) t0 = ts;
+    const raw = Math.min((ts - t0) / dur, 1);
+    const p = easeInOut(raw);
+    path.style.strokeDashoffset = len * (1 - p);
+    const pt = path.getPointAtLength(len * p);
+    dot.setAttribute("cx", pt.x);
+    dot.setAttribute("cy", pt.y);
+    if (raw < 1) {
+      requestAnimationFrame(tick);
+    } else {
+      toEl.classList.add("receiving");
+      setTimeout(() => toEl.classList.remove("receiving"), 550);
+      setTimeout(() => {
+        path.style.transition = "opacity 0.4s ease";
+        dot.style.transition = "opacity 0.4s ease";
+        path.style.opacity = "0";
+        dot.style.opacity = "0";
+        setTimeout(() => { path.remove(); dot.remove(); }, 400);
+      }, 750);
+    }
+  }
+
+  requestAnimationFrame(tick);
+}
 
 connectSocket();

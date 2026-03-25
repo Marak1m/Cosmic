@@ -4,6 +4,102 @@
    ========================================================= */
 
 /* =========================================================
+   COMMUNICATION GRAPH
+   ========================================================= */
+.agent-graph {
+  position: relative;
+  height: 300px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background:
+    radial-gradient(ellipse 55% 50% at 50% 50%, rgba(124, 58, 237, 0.06), transparent 70%),
+    rgba(2, 3, 9, 0.65);
+  overflow: hidden;
+}
+
+.graph-lines {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.graph-node {
+  position: absolute;
+  left: var(--x);
+  top: var(--y);
+  transform: translate(-50%, -50%);
+  z-index: 2;
+  max-width: 140px;
+  padding: 7px 13px;
+  border-radius: 999px;
+  border: 1px solid var(--border-bright);
+  background: rgba(4, 6, 15, 0.82);
+  color: rgba(234, 238, 252, 0.75);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  transition: border-color 0.25s ease, background 0.25s ease,
+    box-shadow 0.25s ease, color 0.25s ease, transform 0.25s ease;
+}
+
+.graph-node.leader {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 0.78rem;
+  border-color: rgba(167, 139, 250, 0.5);
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.22), rgba(4, 6, 15, 0.85));
+  color: var(--violet);
+}
+
+.graph-node.active {
+  border-color: rgba(167, 139, 250, 0.85);
+  background: rgba(124, 58, 237, 0.18);
+  color: var(--violet);
+  transform: translate(-50%, -50%) scale(1.08);
+  box-shadow: 0 0 22px rgba(167, 139, 250, 0.35), 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+
+.graph-node.receiving {
+  border-color: rgba(34, 211, 238, 0.9);
+  background: rgba(34, 211, 238, 0.14);
+  color: var(--cyan);
+  transform: translate(-50%, -50%) scale(1.1);
+  box-shadow: 0 0 20px rgba(34, 211, 238, 0.35), 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+
+/* Arrow paths */
+.graph-arrow {
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke: var(--violet);
+}
+
+.graph-arrow[data-leader="false"] {
+  stroke: var(--cyan);
+}
+
+/* Travelling dot */
+.graph-dot {
+  fill: var(--violet);
+  filter: drop-shadow(0 0 5px rgba(167, 139, 250, 0.8));
+}
+
+.graph-dot[data-leader="false"] {
+  fill: var(--cyan);
+  filter: drop-shadow(0 0 5px rgba(34, 211, 238, 0.8));
+}
+
+/* =========================================================
    DEMO NAVIGATION
    ========================================================= */
 .demo-actions {
