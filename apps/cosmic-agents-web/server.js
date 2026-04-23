@@ -101,9 +101,13 @@ const PLANNER_MAX_OUTPUT_TOKENS = readIntEnv(
   Math.min(2000, MAX_OUTPUT_TOKENS),
   { min: 256, max: MAX_OUTPUT_TOKENS }
 );
+// Leader runs on o1 and reasoning tokens count against this cap.
+// 2500 was too low: o1 was burning the budget on hidden reasoning
+// and producing thin/empty visible replies. 4500 gives it room
+// for a real heartbeat message plus reasoning overhead.
 const LEADER_MAX_OUTPUT_TOKENS = readIntEnv(
   "LEADER_MAX_OUTPUT_TOKENS",
-  Math.min(2500, MAX_OUTPUT_TOKENS),
+  Math.min(4500, MAX_OUTPUT_TOKENS),
   { min: 256, max: MAX_OUTPUT_TOKENS }
 );
 const AGENT_MAX_OUTPUT_TOKENS = readIntEnv(
@@ -111,9 +115,14 @@ const AGENT_MAX_OUTPUT_TOKENS = readIntEnv(
   Math.min(3000, MAX_OUTPUT_TOKENS),
   { min: 256, max: MAX_OUTPUT_TOKENS }
 );
+// Finalizer is the single most important call of the run — it
+// synthesizes every specialist's research into the user-facing
+// answer. On o1 the cap includes reasoning tokens, so 5000 was
+// producing literal "TERMINATE" (empty body) when reasoning ate
+// the budget. 12000 leaves headroom for a rich synthesis.
 const FINALIZER_MAX_OUTPUT_TOKENS = readIntEnv(
   "FINALIZER_MAX_OUTPUT_TOKENS",
-  Math.min(5000, MAX_OUTPUT_TOKENS),
+  Math.min(12000, MAX_OUTPUT_TOKENS),
   { min: 256, max: MAX_OUTPUT_TOKENS }
 );
 const TOOL_CALL_MAX_TOKENS = readIntEnv(
@@ -870,10 +879,20 @@ async function ssaSelectNextSpeaker(mem, allAgents, state) {
   const selectorPrompt = [
     "You are the COSMIC Speaker Selector Agent (SSA).",
     `Choose the next speaker from: ${candidates.join(", ")}.`,
-    "Rules:",
-    `- Never choose ${lastSpeaker}.`,
-    "- Prefer an agent whose domain matches what the last message asks for.",
-    "- Prefer an agent who has been idle longer (higher recency is more idle).",
+    "",
+    "Priority order (first rule that applies wins):",
+    `1. Never choose ${lastSpeaker}.`,
+    "2. If the last message explicitly addresses or asks a question of a",
+    "   specific candidate (by name or by their clear domain), pick that",
+    "   candidate. Collaboration depends on follow-through.",
+    "3. If the last message introduces a fact that changes another",
+    "   candidate's deliverable (e.g. a flight time that affects hotel",
+    "   choice), pick the candidate whose work now needs to react.",
+    "4. Otherwise prefer the candidate whose domain best matches what",
+    "   the conversation needs next — not just topic overlap with the",
+    "   last line.",
+    "5. Tie-break on recency: pick the candidate with the highest",
+    "   'turns since last spoke' (most idle).",
     "",
     `Recency (turns since last spoke): ${JSON.stringify(recencyObj)}`,
     "",
@@ -1825,17 +1844,33 @@ function buildAgentPrompt(spec, collaboratorNames, taskSummary) {
     `Task: ${taskSummary || "Collaborate with the crew to solve the user's request."}`,
     focus ? `Your focus: ${focus}.` : "Own your domain's contribution to the task.",
     "",
-    "How to participate:",
-    "- Stay strictly within your specialty. Do not try to do other specialists' work.",
-    "- Be concise and high-signal. Short paragraphs or tight bullets; no filler.",
-    "- Adapt your reasoning when new information or specialist input arrives.",
-    "- Cite the subtask id (e.g., 'Addressing g2:') when the Leader's task brief uses subtask ids.",
-    "- Make reasonable assumptions if details are missing; do not ask the user.",
+    "How to participate (COSMIC collaboration model):",
+    "- Your expertise is your anchor — but you are part of a crew, not",
+    "  a silo. Read what peers just said and BUILD on it: reference them",
+    "  by name, pull their numbers/choices into your analysis, and call",
+    "  out where their output changes yours.",
+    "- When your work depends on a piece of information a peer is better",
+    "  positioned to give, ask them explicitly. Example: \"Hotel_Selector,",
+    "  I need your Da Nang pick to finalize the airport-transfer buffer\"",
+    "  — then nominate them next.",
+    "- If a peer's choice conflicts with a constraint in your domain,",
+    "  flag the conflict and propose the resolution. Don't stay silent",
+    "  just because the subtask wasn't assigned to you.",
+    "- Cite the subtask id (e.g., 'Addressing g2:') when the Leader's",
+    "  task brief uses subtask ids, but don't treat subtasks as walls —",
+    "  multiple agents can co-own the same subtask if it needs it.",
+    "- Be concrete and specific. Numbers, names, timeframes, tradeoffs.",
+    "  Avoid filler and avoid re-stating what a peer just said verbatim.",
+    "- Make reasonable assumptions if details are missing; do not ask",
+    "  the user.",
     "",
     `Collaborators: ${collaboratorNames.join(", ")}. You follow the Leader's direction.`,
     "",
     "Turn-taking:",
-    "- End every message by nominating the next speaker on a clear line (e.g., \"Next speaker: Leader\").",
+    "- End every message by nominating the next speaker on a clear line",
+    "  (e.g., \"Next speaker: Hotel_Selector\"). Prefer the peer whose",
+    "  input is actually unblocked by what you just said — not just the",
+    "  next name on the list.",
     "- Do not prefix your message with your own name.",
   ];
 
@@ -2082,22 +2117,44 @@ async function generateFinalAnswer(prompt, history, streamContext = null) {
     : [];
   const transcript = buildTranscript(normalizedHistory, MAX_INPUT_CHARS);
   const systemPrompt = [
-    "You are the Final Answer Validator.",
-    "You read the full conversation transcript and produce the final answer for the user.",
-    "Validate for: completeness, correctness, internal consistency, and that it matches the user's request.",
-    "If anything is missing or weak, fix it directly (do not ask questions).",
-    "Output ONLY the final answer (no meta commentary, no speaker tags, no 'who speaks next').",
-    "End with TERMINATE on the last line of the same message.",
+    "You are the COSMIC Final Answer Synthesizer.",
+    "Every specialist in the transcript did real research. Your job is to",
+    "weave ALL of their concrete findings into ONE comprehensive, polished",
+    "answer for the user — not to summarize the Leader's closing message.",
+    "",
+    "Rules:",
+    "- Use the specialists' specifics verbatim where the detail matters:",
+    "  exact numbers, named places, concrete day-by-day items, cost figures,",
+    "  hotel names, flight windows, durations, warnings, packing items, etc.",
+    "  If a specialist produced a table/list, preserve it.",
+    "- Do NOT compress rich specialist output into one-line bullets when the",
+    "  specialist gave multi-point detail. Richer is better; the user will",
+    "  re-use this answer as their working document.",
+    "- Organize with clear section headers the user can navigate. For a",
+    "  travel plan the natural shape is: Route overview → Day-by-day →",
+    "  Flights & transport → Hotels → Key sights & food per city →",
+    "  Visa / SIM / money → May weather & packing → Total budget →",
+    "  Lower-budget alternative. Pick section headers that fit the task.",
+    "- Resolve any contradictions between specialists silently — pick the",
+    "  strongest number/recommendation and present one coherent plan.",
+    "- Do not include 'Next speaker:' lines, speaker names, Leader",
+    "  heartbeat metrics, or meta commentary.",
+    "- Write for the user, not the agents. No 'Addressing g2:' labels.",
+    "- End with TERMINATE on its own final line.",
   ].join("\n");
 
   const userPrompt = [
-    "User prompt:",
+    "Original user prompt:",
     String(prompt || "").trim(),
     "",
-    "Conversation transcript (for context):",
+    "Full conversation transcript — treat this as your source material.",
+    "Every concrete fact worth including is already in here somewhere;",
+    "your job is to extract and arrange, not to invent or compress.",
+    "",
     transcript,
     "",
-    "Return the final answer now.",
+    "Now produce the final user-facing answer. Be thorough — the user",
+    "is expecting the full plan, not a summary.",
   ].join("\n");
 
   const onDelta =
@@ -2120,13 +2177,93 @@ async function generateFinalAnswer(prompt, history, streamContext = null) {
     {
       model: FINALIZER_MODEL,
       temperature: 0.2,
-      reasoning_effort: isO1Model(FINALIZER_MODEL) ? "medium" : undefined,
+      // "low" here, not "medium": this call is synthesis, not problem
+      // solving — the hard thinking was done by specialists. Keeping
+      // reasoning budget small means more of max_tokens is available
+      // for the visible answer. With "medium" o1 was consuming all
+      // 5000 tokens on hidden reasoning and emitting bare "TERMINATE".
+      reasoning_effort: isO1Model(FINALIZER_MODEL) ? "low" : undefined,
       max_tokens: FINALIZER_MAX_OUTPUT_TOKENS,
       onDelta,
     }
   );
 
   return ensureTerminateAtEnd((message.content || "").trim());
+}
+
+// If the finalizer call comes back empty or trivially short (this has
+// happened when o1 burns its whole token budget on hidden reasoning
+// and emits no visible output), we must not send the user a literal
+// "TERMINATE" as the final answer. Instead, deterministically stitch
+// the specialists' own substantive messages into a structured answer.
+// This is a graceful-degradation path: the user still gets every bit
+// of research the crew produced, just without the LLM's polish pass.
+function buildFallbackFinalFromMemory(userPrompt, mem) {
+  const full = Array.isArray(mem && mem.full) ? mem.full : [];
+  if (!full.length) return null;
+
+  // Pick each agent's most substantive message (longest non-Leader
+  // assistant message for specialists; the longest Leader heartbeat
+  // is useful too).
+  const bestByAgent = new Map();
+  for (const entry of full) {
+    if (!entry || entry.role !== "assistant" || !entry.name) continue;
+    const content = String(entry.content || "").trim();
+    if (!content) continue;
+    const existing = bestByAgent.get(entry.name);
+    if (!existing || content.length > existing.length) {
+      bestByAgent.set(entry.name, content);
+    }
+  }
+  if (!bestByAgent.size) return null;
+
+  const specialistSections = [];
+  let leaderSection = null;
+  for (const [name, content] of bestByAgent.entries()) {
+    // Strip "Next speaker: X" trailing nominations and lingering
+    // TERMINATE tokens so the raw specialist output reads as a
+    // stand-alone section.
+    const cleaned = content
+      .replace(/\n?\s*Next\s+speaker\s*:.*$/gim, "")
+      .replace(/\s*TERMINATE\s*$/i, "")
+      .trim();
+    if (!cleaned) continue;
+    const heading = String(name).replace(/_/g, " ");
+    const block = `## ${heading}\n\n${cleaned}`;
+    if (name === LEADER_NAME) {
+      leaderSection = block;
+    } else {
+      specialistSections.push(block);
+    }
+  }
+  if (!specialistSections.length && !leaderSection) return null;
+
+  const header = [
+    `# Final Plan`,
+    "",
+    `Original request: ${String(userPrompt || "").trim()}`,
+    "",
+    "_The model's final polish pass came back empty, so this answer is",
+    "assembled directly from each specialist's research. Every section",
+    "below is the specialist's own work — no detail has been cut._",
+    "",
+  ].join("\n");
+
+  const body = [...specialistSections];
+  if (leaderSection) body.push(leaderSection);
+
+  return ensureTerminateAtEnd(`${header}\n${body.join("\n\n")}`);
+}
+
+// "Thin" means the finalizer gave us essentially nothing (bare
+// TERMINATE or a sentence or two). Tuned for the observed failure
+// mode where o1 emits empty content; a legit short answer to a
+// trivial prompt would still clear 400 chars of actual text.
+function isFinalAnswerThin(text) {
+  const stripped = String(text || "")
+    .replace(/\s*TERMINATE\s*$/i, "")
+    .trim();
+  return stripped.length < 400;
 }
 
 // Keep-alive pings so reverse proxies (Railway, Cloudflare, nginx) don't
@@ -2242,17 +2379,48 @@ async function runConversationCoreInner(finalPrompt, ws, runId) {
     send(ws, { type: "status", message: `${reason} Finalizing output...`, runId });
     const finalMessageId = `${runId}:final`;
     send(ws, { type: "message_start", runId, id: finalMessageId, name: LEADER_NAME });
-    const finalAnswer = await generateFinalAnswer(finalPrompt, mem, {
-      ws,
-      runId,
-      messageId: finalMessageId,
-    });
+
+    let finalAnswer;
+    try {
+      finalAnswer = await generateFinalAnswer(finalPrompt, mem, {
+        ws,
+        runId,
+        messageId: finalMessageId,
+      });
+    } catch (err) {
+      console.error("[runFinalization] generateFinalAnswer failed:", err);
+      finalAnswer = "TERMINATE"; // force fallback branch below
+    }
+
+    // Safety net: if the finalizer came back thin (e.g. o1 burned its
+    // entire token cap on hidden reasoning and emitted nothing), don't
+    // ship the user a bare "TERMINATE". Stitch the specialists' own
+    // research into a structured answer so their work reaches the user.
+    if (isFinalAnswerThin(finalAnswer)) {
+      const fallback = buildFallbackFinalFromMemory(finalPrompt, mem);
+      if (fallback) {
+        console.warn(
+          "[runFinalization] finalizer output was thin; using deterministic fallback."
+        );
+        send(ws, {
+          type: "status",
+          runId,
+          message:
+            "Final synthesis was empty; composing answer directly from specialist research.",
+        });
+        finalAnswer = fallback;
+      }
+    }
+
     appendMemory(mem, {
       role: "assistant",
       name: LEADER_NAME,
       content: finalAnswer,
       turn: mem.full.length,
     });
+    // The `message` event with the same id overwrites whatever was
+    // streamed into the UI bubble — so replacing a thin stream with
+    // the fallback above lands correctly client-side.
     send(ws, {
       type: "message",
       runId,
