@@ -81,7 +81,14 @@ const HEARTBEAT_MODEL = process.env.HEARTBEAT_MODEL || LEADER_MODEL;
 // materially changing which agent is chosen. Override with env if
 // you want to A/B against o1 / gpt-5-family.
 const SELECTOR_MODEL = process.env.SELECTOR_MODEL || "gpt-5.4-mini";
-const FINALIZER_MODEL = process.env.FINALIZER_MODEL || "o1";
+// Finalizer produces the single user-facing answer. Was on o1, but
+// o1 kept starving its own visible output: it burns the max_tokens
+// budget on hidden reasoning tokens and emits bare "TERMINATE" (or
+// nothing), forcing buildFallbackFinalFromMemory to stitch a raw
+// answer from memory. gpt-5.4 has a much better visible/reasoning
+// token ratio for extract-and-arrange synthesis — which is exactly
+// what the finalizer does. Override to o1 if you want to A/B.
+const FINALIZER_MODEL = process.env.FINALIZER_MODEL || "gpt-5.4";
 const ENABLE_PROMPT_OPTIMIZER = normalizeBoolean(process.env.ENABLE_PROMPT_OPTIMIZER);
 const OPTIMIZER_MODEL = process.env.OPTIMIZER_MODEL || OPENAI_MODEL;
 const ENABLE_USER_CLARIFICATIONS = normalizeBoolean(process.env.ENABLE_USER_CLARIFICATIONS);
@@ -2249,11 +2256,12 @@ async function generateFinalAnswer(prompt, history, streamContext = null) {
     {
       model: FINALIZER_MODEL,
       temperature: 0.2,
-      // "low" here, not "medium": this call is synthesis, not problem
-      // solving — the hard thinking was done by specialists. Keeping
-      // reasoning budget small means more of max_tokens is available
-      // for the visible answer. With "medium" o1 was consuming all
-      // 5000 tokens on hidden reasoning and emitting bare "TERMINATE".
+      // Finalizer default is now gpt-5.4 (see FINALIZER_MODEL decl).
+      // Kept the isO1Model guard so anyone who overrides back to o1
+      // via env still gets the "low" reasoning_effort that prevents
+      // empty "TERMINATE" outputs. For gpt-5 family we let the model
+      // manage its own reasoning budget — it has a much better
+      // visible/reasoning token ratio out of the box.
       reasoning_effort: isO1Model(FINALIZER_MODEL) ? "low" : undefined,
       max_tokens: FINALIZER_MAX_OUTPUT_TOKENS,
       onDelta,
