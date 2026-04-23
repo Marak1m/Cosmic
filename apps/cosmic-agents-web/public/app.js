@@ -1,3 +1,17 @@
+/* =========================================================
+   COSMIC AGENTS — /demo client
+   -----------------------------------------------------------
+   Two UI modes:
+     - PRE-LAUNCH: prompt form on top of the cosmic backdrop.
+     - MISSION:   body.mission-mode; solar system (driven by
+                  createSolarSystem from solar.js) on the left,
+                  tabbed telemetry rail on the right.
+   Everything else (WS events, message rendering, brief /
+   heartbeat / SSA renderers) is unchanged from the previous
+   Phase-2 wiring — the server contract is identical.
+   ========================================================= */
+
+// ── DOM refs ───────────────────────────────────────────────
 const statusPill = document.getElementById("status-pill");
 const runIdLabel = document.getElementById("run-id");
 const liveStatus = document.getElementById("live-status");
@@ -8,28 +22,94 @@ const finalOutput = document.getElementById("final-output");
 const promptForm = document.getElementById("prompt-form");
 const promptInput = document.getElementById("prompt-input");
 const runButton = document.getElementById("run-btn");
+const newMissionBtn = document.getElementById("new-mission-btn");
+const missionRail = document.getElementById("mission-rail");
+const graphContainer = document.getElementById("agent-graph");
+const graphStatusEl = document.getElementById("graph-status");
 
+// Task brief / heartbeat state + refs
+const subtaskNodesById = new Map();
+const briefSummaryEl = document.getElementById("brief-summary");
+const briefConstraintsEl = document.getElementById("brief-constraints");
+const briefSubtasksEl = document.getElementById("brief-subtasks");
+const briefStatusEl = document.getElementById("brief-status");
+const hbCovFill = document.getElementById("hb-coverage-fill");
+const hbCovValue = document.getElementById("hb-coverage-value");
+const hbConFill = document.getElementById("hb-consistency-fill");
+const hbConValue = document.getElementById("hb-consistency-value");
+const hbStable = document.getElementById("hb-stable");
+const hbStatus = document.getElementById("heartbeat-status");
+const hbInconsistencies = document.getElementById("hb-inconsistencies");
+const ssaChip = document.getElementById("ssa-chip");
+
+// ── WS + solar state ───────────────────────────────────────
 let socket;
 let activeAgent = null;
 let pendingClarifyRunId = null;
 let clarifyOverlay = null;
+let solar = null; // solar-system instance from createSolarSystem
 const messageNodesById = new Map();
 
-// ── Communication graph state ──────────────────────────────
-const graphNodes = new Map(); // agentName → DOM element
-let graphSvg = null;
-let prevSpeaker = null;
-let graphLeaderName = null;
-
+// Presets via ?prompt=
 const presetPrompt = new URLSearchParams(window.location.search).get("prompt");
 if (presetPrompt && promptInput) {
   promptInput.value = presetPrompt;
 }
 
 function setStatus(text) {
-  statusPill.textContent = text;
+  if (statusPill) statusPill.textContent = text;
 }
 
+// ── Mission mode ───────────────────────────────────────────
+function enterMissionMode() {
+  document.body.classList.add("mission-mode");
+  // Ensure the solar instance is live when we enter mission mode.
+  ensureSolar();
+  // Default tab on every fresh launch.
+  switchTab("dialogue");
+}
+
+function exitMissionMode() {
+  document.body.classList.remove("mission-mode");
+}
+
+function ensureSolar() {
+  if (solar || !graphContainer || typeof window.createSolarSystem !== "function") {
+    return solar;
+  }
+  solar = window.createSolarSystem(graphContainer, {
+    mode: "live",
+    statusEl: graphStatusEl,
+  });
+  return solar;
+}
+
+// ── Tabs ───────────────────────────────────────────────────
+function switchTab(name) {
+  if (!missionRail) return;
+  missionRail.dataset.tab = name;
+  document.querySelectorAll(".mission-tab").forEach((tab) => {
+    const isActive = tab.dataset.tab === name;
+    tab.classList.toggle("active", isActive);
+    tab.setAttribute("aria-selected", isActive ? "true" : "false");
+    if (isActive) tab.removeAttribute("data-flash");
+  });
+}
+
+function flashTab(name) {
+  const btn = document.querySelector(`.mission-tab[data-tab="${name}"]`);
+  if (!btn) return;
+  // Don't flash the currently-active tab.
+  if (btn.classList.contains("active")) return;
+  btn.setAttribute("data-flash", "1");
+  setTimeout(() => btn.removeAttribute("data-flash"), 3500);
+}
+
+document.querySelectorAll(".mission-tab").forEach((tab) => {
+  tab.addEventListener("click", () => switchTab(tab.dataset.tab));
+});
+
+// ── WebSocket ──────────────────────────────────────────────
 function connectSocket() {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   const wsUrl = `${protocol}://${window.location.host}/ws`;
@@ -51,36 +131,58 @@ function connectSocket() {
   });
 }
 
-function resetUI() {
-  agentGrid.innerHTML = "";
-  chatFeed.innerHTML = "";
-  finalOutput.textContent = "Run a mission to see the leader's finalized response here.";
-  runIdLabel.textContent = "Planning...";
-  liveStatus.textContent = "Preparing";
-  finalStatus.textContent = "Pending";
+// ── UI reset ───────────────────────────────────────────────
+function resetUI({ keepMissionMode = false } = {}) {
+  if (agentGrid) agentGrid.innerHTML = "";
+  if (chatFeed) chatFeed.innerHTML = "";
+  if (finalOutput) {
+    finalOutput.innerHTML =
+      '<p class="mono">Run a mission to see the Leader\'s finalized response here.</p>';
+  }
+  if (runIdLabel) runIdLabel.textContent = "Planning...";
+  if (liveStatus) liveStatus.textContent = "Preparing";
+  if (finalStatus) finalStatus.textContent = "Pending";
   activeAgent = null;
   pendingClarifyRunId = null;
   hideClarifications();
   if (promptInput) promptInput.disabled = false;
   messageNodesById.clear();
-  // reset graph
-  graphNodes.clear();
-  graphSvg = null;
-  prevSpeaker = null;
-  graphLeaderName = null;
-  const graphEl = document.getElementById("agent-graph");
-  if (graphEl) {
-    Array.from(graphEl.children).forEach((c) => {
-      if (!c.classList.contains("graph-lines")) c.remove();
-    });
-    const svg = graphEl.querySelector(".graph-lines");
-    if (svg) svg.innerHTML = "";
+
+  // Solar
+  if (solar) {
+    solar.destroy();
+    solar = null;
   }
-  const graphStatus = document.getElementById("graph-status");
-  if (graphStatus) graphStatus.textContent = "Waiting for crew...";
+  if (graphStatusEl) graphStatusEl.textContent = "Waiting for crew...";
+
+  // Brief + heartbeat
+  subtaskNodesById.clear();
+  if (briefSummaryEl) briefSummaryEl.textContent = "";
+  if (briefConstraintsEl) briefConstraintsEl.innerHTML = "";
+  if (briefSubtasksEl) briefSubtasksEl.innerHTML = "";
+  if (briefStatusEl) briefStatusEl.textContent = "No brief yet";
+  if (hbCovFill) hbCovFill.style.width = "0%";
+  if (hbConFill) hbConFill.style.width = "0%";
+  if (hbCovValue) hbCovValue.textContent = "--";
+  if (hbConValue) hbConValue.textContent = "--";
+  if (hbStable) {
+    hbStable.textContent = "pending";
+    hbStable.removeAttribute("data-stable");
+  }
+  if (hbStatus) hbStatus.textContent = "No check-in yet";
+  if (hbInconsistencies) hbInconsistencies.innerHTML = "";
+  if (ssaChip) {
+    ssaChip.setAttribute("data-hidden", "1");
+    ssaChip.removeAttribute("data-reason");
+    ssaChip.textContent = "SSA · idle";
+  }
+
+  if (!keepMissionMode) exitMissionMode();
 }
 
+// ── Agent grid ─────────────────────────────────────────────
 function renderAgents(leader, agents) {
+  if (!agentGrid) return;
   agentGrid.innerHTML = "";
 
   const buildCard = (name, roleLabel, tools = []) => {
@@ -121,9 +223,12 @@ function renderAgents(leader, agents) {
     agentGrid.appendChild(buildCard(agent.name, agent.role, agent.tools || []));
   });
 
-  layoutGraphNodes(leader, agents);
+  // Hand the crew off to the solar instance so it can lay out orbits.
+  const s = ensureSolar();
+  if (s) s.layout(leader, agents);
 }
 
+// ── Chat feed ──────────────────────────────────────────────
 function ensureMessageNode(id, name) {
   if (id && messageNodesById.has(id)) {
     return messageNodesById.get(id);
@@ -192,25 +297,20 @@ function setMessageText(id, name, content) {
   chatFeed.scrollTop = chatFeed.scrollHeight;
 }
 
+// ── Speaker switching ──────────────────────────────────────
 function setActiveAgent(name) {
   if (activeAgent === name) return;
 
-  // draw transfer arc before updating activeAgent
-  if (prevSpeaker && prevSpeaker !== name) {
-    drawTransfer(prevSpeaker, name);
-  }
-  prevSpeaker = name;
+  const s = ensureSolar();
+  if (s) s.setSpeaker(name);
   activeAgent = name;
 
   document.querySelectorAll(".agent-card").forEach((card) => {
     card.classList.toggle("active", card.dataset.agent === name);
   });
-
-  document.querySelectorAll(".graph-node").forEach((node) => {
-    node.classList.toggle("active", node.dataset.agent === name);
-  });
 }
 
+// ── Clarifications overlay ─────────────────────────────────
 function buildClarificationAnswerText(root) {
   const answers = [];
   (root || document).querySelectorAll(".clarify-answer").forEach((node, index) => {
@@ -337,27 +437,40 @@ function showClarifications(runId, questions) {
   clarifyOverlay = overlay;
 
   if (promptInput) promptInput.disabled = true;
-  finalStatus.textContent = "Awaiting clarifications";
+  if (finalStatus) finalStatus.textContent = "Awaiting clarifications";
 
   const firstAnswer = overlay.querySelector(".clarify-answer");
   if (firstAnswer) firstAnswer.focus();
 }
 
+// ── Server event dispatch ──────────────────────────────────
 function handleEvent(payload) {
   switch (payload.type) {
     case "status":
       setStatus(payload.message);
-      liveStatus.textContent = payload.message;
-      if (payload.runId) {
+      if (liveStatus) liveStatus.textContent = payload.message;
+      if (payload.runId && runIdLabel) {
         runIdLabel.textContent = `Run: ${payload.runId}`;
       }
       break;
     case "agents":
       renderAgents(payload.leader, payload.agents || []);
-      runIdLabel.textContent = `Run: ${payload.runId}`;
+      if (runIdLabel) runIdLabel.textContent = `Run: ${payload.runId}`;
       break;
     case "speaker":
       setActiveAgent(payload.name);
+      break;
+    case "ssa_decision":
+      renderSsaDecision(payload);
+      break;
+    case "task_brief":
+      renderTaskBrief(payload.brief || {});
+      break;
+    case "subtask_update":
+      applySubtaskStatuses(payload.statuses || {});
+      break;
+    case "heartbeat":
+      renderHeartbeat(payload);
       break;
     case "message_start":
       {
@@ -380,23 +493,25 @@ function handleEvent(payload) {
       setMessageText(payload.id, payload.name, payload.content);
       break;
     case "clarify":
-      if (payload.runId) {
+      if (payload.runId && runIdLabel) {
         runIdLabel.textContent = `Run: ${payload.runId}`;
       }
       showClarifications(payload.runId, payload.questions || []);
       break;
     case "final":
-      finalOutput.textContent = payload.content;
-      finalStatus.textContent = "Complete";
+      if (finalOutput) finalOutput.textContent = payload.content;
+      if (finalStatus) finalStatus.textContent = "Complete";
       setStatus("Complete");
-      runButton.disabled = false;
+      if (runButton) runButton.disabled = false;
       if (promptInput) promptInput.disabled = false;
+      // Auto-focus Final Output on completion.
+      switchTab("final");
       break;
     case "error":
-      finalOutput.textContent = payload.message;
-      finalStatus.textContent = "Error";
+      if (finalOutput) finalOutput.textContent = payload.message;
+      if (finalStatus) finalStatus.textContent = "Error";
       setStatus("Error");
-      runButton.disabled = false;
+      if (runButton) runButton.disabled = false;
       if (promptInput) promptInput.disabled = false;
       hideClarifications();
       break;
@@ -405,152 +520,175 @@ function handleEvent(payload) {
   }
 }
 
-promptForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  const prompt = promptInput.value.trim();
-  if (!prompt) return;
+// ── Form submit / New mission ──────────────────────────────
+if (promptForm) {
+  promptForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const prompt = promptInput.value.trim();
+    if (!prompt) return;
 
-  if (!socket || socket.readyState !== WebSocket.OPEN) {
-    setStatus("Connecting...");
-    return;
-  }
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      setStatus("Connecting...");
+      return;
+    }
 
-  resetUI();
-  runButton.disabled = true;
-  setStatus("Launching...");
+    resetUI({ keepMissionMode: true });
+    enterMissionMode();
+    if (runButton) runButton.disabled = true;
+    setStatus("Launching...");
 
-  socket.send(
-    JSON.stringify({
-      type: "start",
-      prompt,
-    })
-  );
-});
-
-// ── Communication graph ────────────────────────────────────
-
-function layoutGraphNodes(leader, agents) {
-  const graphEl = document.getElementById("agent-graph");
-  if (!graphEl) return;
-
-  graphNodes.clear();
-  graphLeaderName = leader ? leader.name : null;
-
-  // remove old nodes but keep the SVG element
-  Array.from(graphEl.children).forEach((c) => {
-    if (!c.classList.contains("graph-lines")) c.remove();
+    socket.send(
+      JSON.stringify({
+        type: "start",
+        prompt,
+      })
+    );
   });
-
-  graphSvg = graphEl.querySelector(".graph-lines");
-  if (graphSvg) graphSvg.innerHTML = "";
-
-  const all = [];
-  if (leader) all.push(leader);
-  agents.forEach((a) => all.push(a));
-  if (all.length === 0) return;
-
-  all.forEach((agent, i) => {
-    const angle = (i / all.length) * 2 * Math.PI - Math.PI / 2;
-    const px = 50 + 38 * Math.cos(angle);
-    const py = 50 + 42 * Math.sin(angle);
-
-    const node = document.createElement("div");
-    node.className =
-      "graph-node" +
-      (leader && agent.name === leader.name ? " leader" : "");
-    node.dataset.agent = agent.name;
-    node.style.setProperty("--x", px + "%");
-    node.style.setProperty("--y", py + "%");
-    node.textContent = agent.name.replace(/_/g, " ");
-    graphEl.appendChild(node);
-    graphNodes.set(agent.name, node);
-  });
-
-  const statusEl = document.getElementById("graph-status");
-  if (statusEl) statusEl.textContent = all.length + " agents active";
 }
 
-function drawTransfer(fromName, toName) {
-  if (!graphSvg || !fromName || !toName || fromName === toName) return;
-  const fromEl = graphNodes.get(fromName);
-  const toEl = graphNodes.get(toName);
-  if (!fromEl || !toEl) return;
+if (newMissionBtn) {
+  newMissionBtn.addEventListener("click", () => {
+    resetUI();
+    setStatus("Idle");
+    if (promptInput) {
+      promptInput.value = "";
+      promptInput.focus();
+    }
+    if (runButton) runButton.disabled = false;
+  });
+}
 
-  const stageRect = graphSvg.getBoundingClientRect();
-  if (!stageRect.width) return;
-
-  const fromRect = fromEl.getBoundingClientRect();
-  const toRect = toEl.getBoundingClientRect();
-
-  const x1 = fromRect.left - stageRect.left + fromRect.width / 2;
-  const y1 = fromRect.top - stageRect.top + fromRect.height / 2;
-  const x2 = toRect.left - stageRect.left + toRect.width / 2;
-  const y2 = toRect.top - stageRect.top + toRect.height / 2;
-
-  graphSvg.setAttribute(
-    "viewBox",
-    "0 0 " + stageRect.width + " " + stageRect.height
-  );
-
-  // curved bezier — offset perpendicular to the midpoint
-  const mx = (x1 + x2) / 2;
-  const my = (y1 + y2) / 2;
-  const dx = x2 - x1;
-  const dy = y2 - y1;
-  const cpx = mx - dy * 0.3;
-  const cpy = my + dx * 0.3;
-
-  const isLeader = fromName === graphLeaderName;
-
-  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  path.setAttribute("d", "M " + x1 + " " + y1 + " Q " + cpx + " " + cpy + " " + x2 + " " + y2);
-  path.setAttribute("data-leader", String(isLeader));
-  path.classList.add("graph-arrow");
-  graphSvg.appendChild(path);
-
-  const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-  dot.setAttribute("r", "5");
-  dot.setAttribute("data-leader", String(isLeader));
-  dot.classList.add("graph-dot");
-  graphSvg.appendChild(dot);
-
-  const len = path.getTotalLength();
-  if (!len) { path.remove(); dot.remove(); return; }
-
-  path.style.strokeDasharray = len;
-  path.style.strokeDashoffset = len;
-
-  let t0 = null;
-  const dur = 680;
-
-  function easeInOut(p) {
-    return p < 0.5 ? 2 * p * p : -1 + (4 - 2 * p) * p;
+// ── Task brief / heartbeat renderers ───────────────────────
+function renderTaskBrief(brief) {
+  if (!brief) return;
+  if (briefSummaryEl) {
+    briefSummaryEl.textContent = brief.task_summary || "";
   }
 
-  function tick(ts) {
-    if (!t0) t0 = ts;
-    const raw = Math.min((ts - t0) / dur, 1);
-    const p = easeInOut(raw);
-    path.style.strokeDashoffset = len * (1 - p);
-    const pt = path.getPointAtLength(len * p);
-    dot.setAttribute("cx", pt.x);
-    dot.setAttribute("cy", pt.y);
-    if (raw < 1) {
-      requestAnimationFrame(tick);
-    } else {
-      toEl.classList.add("receiving");
-      setTimeout(() => toEl.classList.remove("receiving"), 550);
-      setTimeout(() => {
-        path.style.transition = "opacity 0.4s ease";
-        dot.style.transition = "opacity 0.4s ease";
-        path.style.opacity = "0";
-        dot.style.opacity = "0";
-        setTimeout(() => { path.remove(); dot.remove(); }, 400);
-      }, 750);
+  if (briefConstraintsEl) {
+    briefConstraintsEl.innerHTML = "";
+    (brief.constraints || []).forEach((c) => {
+      const li = document.createElement("li");
+      li.textContent = c;
+      briefConstraintsEl.appendChild(li);
+    });
+    if (!brief.constraints || !brief.constraints.length) {
+      const li = document.createElement("li");
+      li.textContent = "No hard constraints declared.";
+      li.style.color = "var(--dim)";
+      briefConstraintsEl.appendChild(li);
     }
   }
 
-  requestAnimationFrame(tick);
+  if (briefSubtasksEl) {
+    briefSubtasksEl.innerHTML = "";
+    subtaskNodesById.clear();
+    (brief.subtasks || []).forEach((sub) => {
+      const li = document.createElement("li");
+      li.dataset.subtaskId = sub.id;
+      li.dataset.status = "pending";
+
+      const status = document.createElement("div");
+      status.className = "subtask-status";
+
+      const body = document.createElement("div");
+      body.className = "subtask-body";
+
+      const top = document.createElement("div");
+      top.className = "subtask-top";
+
+      const sid = document.createElement("span");
+      sid.className = "subtask-id";
+      sid.textContent = sub.id;
+
+      const assignee = document.createElement("span");
+      assignee.className = "subtask-assignee";
+      assignee.textContent = `→ ${sub.assignee}`;
+
+      top.appendChild(sid);
+      top.appendChild(assignee);
+
+      const desc = document.createElement("div");
+      desc.className = "subtask-desc";
+      desc.textContent = sub.description;
+
+      body.appendChild(top);
+      body.appendChild(desc);
+      li.appendChild(status);
+      li.appendChild(body);
+      briefSubtasksEl.appendChild(li);
+      subtaskNodesById.set(sub.id, li);
+    });
+  }
+
+  if (briefStatusEl) {
+    const n = (brief.subtasks || []).length;
+    briefStatusEl.textContent = `${n} subtasks · 0 complete`;
+  }
+
+  flashTab("brief");
 }
 
+function applySubtaskStatuses(statuses) {
+  if (!statuses || typeof statuses !== "object") return;
+  let completed = 0;
+  let total = 0;
+  subtaskNodesById.forEach((node, id) => {
+    total += 1;
+    const status = statuses[id] || node.dataset.status || "pending";
+    node.dataset.status = status;
+    if (status === "complete") completed += 1;
+  });
+  if (briefStatusEl && total) {
+    briefStatusEl.textContent = `${total} subtasks · ${completed} complete`;
+  }
+}
+
+function renderHeartbeat(payload) {
+  const scores = payload.scores || {};
+  const coverage = Math.max(0, Math.min(1, Number(scores.coverage) || 0));
+  const consistency = Math.max(0, Math.min(1, Number(scores.consistency) || 0));
+
+  if (hbCovFill) hbCovFill.style.width = (coverage * 100).toFixed(0) + "%";
+  if (hbConFill) hbConFill.style.width = (consistency * 100).toFixed(0) + "%";
+  if (hbCovValue) hbCovValue.textContent = (coverage * 100).toFixed(0) + "%";
+  if (hbConValue) hbConValue.textContent = (consistency * 10).toFixed(1) + " / 10";
+  if (hbStable) {
+    hbStable.textContent = scores.stable ? "stable" : "settling";
+    hbStable.dataset.stable = scores.stable ? "yes" : "no";
+  }
+  if (hbStatus) {
+    const when = typeof payload.turn === "number" ? ` (turn ${payload.turn + 1})` : "";
+    hbStatus.textContent = `Last check-in${when}${payload.readyFlag ? " · ready" : ""}`;
+  }
+  if (hbInconsistencies) {
+    hbInconsistencies.innerHTML = "";
+    (payload.inconsistencies || []).forEach((msg) => {
+      const li = document.createElement("li");
+      li.textContent = msg;
+      hbInconsistencies.appendChild(li);
+    });
+  }
+  if (payload.statuses) {
+    applySubtaskStatuses(payload.statuses);
+  }
+
+  // Flash the Heartbeat tab when consistency dips below θ_H so the
+  // user notices the Leader raising concerns even while reading
+  // the dialogue.
+  if (consistency < 0.8 || (payload.inconsistencies || []).length > 0) {
+    flashTab("heartbeat");
+  }
+}
+
+function renderSsaDecision(payload) {
+  if (!ssaChip) return;
+  const reason = String(payload.reason || "").toLowerCase();
+  const label = reason.replace(/_/g, " ");
+  ssaChip.textContent = `SSA · ${label || "select"} → ${payload.chosen || "?"}`;
+  ssaChip.dataset.reason = reason;
+  ssaChip.removeAttribute("data-hidden");
+}
+
+// ── Boot ───────────────────────────────────────────────────
 connectSocket();

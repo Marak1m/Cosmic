@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -15,6 +15,7 @@
       rel="stylesheet"
     />
     <link rel="stylesheet" href="landing.css" />
+    <link rel="stylesheet" href="solar.css" />
     <link rel="stylesheet" href="demo.css" />
   </head>
   <body>
@@ -27,13 +28,22 @@
     <header class="top-nav demo-top-nav">
       <a class="logo" href="/" aria-label="Cosmic home">cosmic</a>
       <div class="demo-actions">
-        <a class="btn secondary small" href="/">Home</a>
+        <a class="btn secondary small prelaunch-only" href="/">Home</a>
+        <button
+          type="button"
+          class="btn secondary small mission-only"
+          id="new-mission-btn"
+        >
+          New mission
+        </button>
         <div class="status-pill" id="status-pill">Idle</div>
       </div>
     </header>
 
-    <main class="demo-main">
-      <section class="hero demo-hero">
+    <main class="demo-main" id="demo-main">
+      <!-- Pre-launch: the whole page is the prompt form on top of the
+           cosmic backdrop. After submit, body.mission-mode hides this. -->
+      <section class="hero demo-hero prelaunch-only">
         <div class="hero-copy">
           <p class="eyebrow">Realtime demo</p>
           <h1>Launch a crew and watch them converge.</h1>
@@ -62,48 +72,164 @@
         </form>
       </section>
 
-      <section class="panel" id="graph-panel">
-        <div class="panel-header">
-          <h2>Communication Flow</h2>
-          <span class="panel-note mono" id="graph-status">Waiting for crew...</span>
+      <!-- Mission mode: solar on the left, tabbed rail on the right.
+           All panels still exist in the DOM; tabs only govern which
+           is visible inside the rail. -->
+      <section class="mission-stage mission-only" id="mission-stage">
+        <div class="panel solar-panel" id="graph-panel">
+          <div class="panel-header">
+            <h2>Agent Solar System</h2>
+            <div class="panel-meta">
+              <span class="ssa-chip mono" id="ssa-chip" data-hidden="1">SSA · idle</span>
+              <span class="panel-note mono" id="graph-status">Waiting for crew...</span>
+            </div>
+          </div>
+          <div class="solar-system" id="agent-graph">
+            <svg class="graph-lines" id="graph-lines" aria-hidden="true"></svg>
+            <div class="sun-core" id="sun-core" data-hidden="1"></div>
+          </div>
         </div>
-        <div class="agent-graph" id="agent-graph">
-          <svg class="graph-lines" id="graph-lines" aria-hidden="true"></svg>
-        </div>
-      </section>
 
-      <section class="panel">
-        <div class="panel-header">
-          <h2>Agent Crew</h2>
-          <span class="panel-note mono" id="run-id">Waiting for launch</span>
-        </div>
-        <div class="agent-grid" id="agent-grid"></div>
-      </section>
+        <aside class="mission-rail" id="mission-rail" data-tab="dialogue">
+          <nav class="mission-tabs" role="tablist" aria-label="Mission telemetry">
+            <button
+              type="button"
+              class="mission-tab active"
+              role="tab"
+              data-tab="dialogue"
+              aria-selected="true"
+              id="tab-dialogue"
+            >
+              Live Dialogue
+            </button>
+            <button
+              type="button"
+              class="mission-tab"
+              role="tab"
+              data-tab="brief"
+              aria-selected="false"
+              id="tab-brief"
+            >
+              Task Brief
+            </button>
+            <button
+              type="button"
+              class="mission-tab"
+              role="tab"
+              data-tab="heartbeat"
+              aria-selected="false"
+              id="tab-heartbeat"
+            >
+              Heartbeat
+            </button>
+            <button
+              type="button"
+              class="mission-tab"
+              role="tab"
+              data-tab="crew"
+              aria-selected="false"
+              id="tab-crew"
+            >
+              Crew
+            </button>
+            <button
+              type="button"
+              class="mission-tab"
+              role="tab"
+              data-tab="final"
+              aria-selected="false"
+              id="tab-final"
+            >
+              Final Output
+            </button>
+          </nav>
 
-      <section class="panel">
-        <div class="panel-header">
-          <h2>Live Dialogue</h2>
-          <span class="panel-note mono" id="live-status">No conversation yet</span>
-        </div>
-        <div class="chat-feed" id="chat-feed"></div>
-      </section>
+          <div class="mission-panels">
+            <!-- Live Dialogue -->
+            <div class="mission-panel" data-tab="dialogue" role="tabpanel" aria-labelledby="tab-dialogue">
+              <div class="panel-header">
+                <h2>Live Dialogue</h2>
+                <span class="panel-note mono" id="live-status">No conversation yet</span>
+              </div>
+              <div class="chat-feed" id="chat-feed"></div>
+            </div>
 
-      <section class="panel output-panel">
-        <div class="panel-header">
-          <h2>Final Output</h2>
-          <span class="panel-note mono" id="final-status">Pending</span>
-        </div>
-        <div class="final-output" id="final-output">
-          <p class="mono">Run a mission to see the Leader's finalized response here.</p>
-        </div>
+            <!-- Task Brief -->
+            <div class="mission-panel" data-tab="brief" role="tabpanel" aria-labelledby="tab-brief" id="brief-panel">
+              <div class="panel-header">
+                <h2>Task Brief</h2>
+                <span class="panel-note mono" id="brief-status">No brief yet</span>
+              </div>
+              <div class="brief-body">
+                <p class="brief-summary" id="brief-summary"></p>
+                <div class="brief-columns">
+                  <div class="brief-col">
+                    <h3 class="brief-label mono">Constraints</h3>
+                    <ul class="brief-constraints" id="brief-constraints"></ul>
+                  </div>
+                  <div class="brief-col">
+                    <h3 class="brief-label mono">Subtasks</h3>
+                    <ul class="brief-subtasks" id="brief-subtasks"></ul>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Heartbeat -->
+            <div class="mission-panel" data-tab="heartbeat" role="tabpanel" aria-labelledby="tab-heartbeat" id="heartbeat-panel">
+              <div class="panel-header">
+                <h2>Leader Heartbeat</h2>
+                <span class="panel-note mono" id="heartbeat-status">No check-in yet</span>
+              </div>
+              <div class="heartbeat-grid">
+                <div class="hb-metric">
+                  <div class="hb-label mono">Coverage <span>C(t)</span></div>
+                  <div class="hb-bar"><div class="hb-fill" id="hb-coverage-fill"></div></div>
+                  <div class="hb-value mono" id="hb-coverage-value">--</div>
+                </div>
+                <div class="hb-metric">
+                  <div class="hb-label mono">Consistency <span>H(t)</span></div>
+                  <div class="hb-bar"><div class="hb-fill" id="hb-consistency-fill"></div></div>
+                  <div class="hb-value mono" id="hb-consistency-value">--</div>
+                </div>
+                <div class="hb-metric">
+                  <div class="hb-label mono">Stability</div>
+                  <div class="hb-stable mono" id="hb-stable">pending</div>
+                  <div class="hb-value mono">τ = C·H·stable</div>
+                </div>
+              </div>
+              <ul class="hb-inconsistencies" id="hb-inconsistencies"></ul>
+            </div>
+
+            <!-- Crew -->
+            <div class="mission-panel" data-tab="crew" role="tabpanel" aria-labelledby="tab-crew">
+              <div class="panel-header">
+                <h2>Agent Crew</h2>
+                <span class="panel-note mono" id="run-id">Waiting for launch</span>
+              </div>
+              <div class="agent-grid" id="agent-grid"></div>
+            </div>
+
+            <!-- Final Output -->
+            <div class="mission-panel output-panel" data-tab="final" role="tabpanel" aria-labelledby="tab-final">
+              <div class="panel-header">
+                <h2>Final Output</h2>
+                <span class="panel-note mono" id="final-status">Pending</span>
+              </div>
+              <div class="final-output" id="final-output">
+                <p class="mono">Run a mission to see the Leader's finalized response here.</p>
+              </div>
+            </div>
+          </div>
+        </aside>
       </section>
     </main>
 
-    <footer class="demo-footer">
+    <footer class="demo-footer prelaunch-only">
       <p class="mono">cosmic-agents.com &mdash; realtime multi-agent workflows</p>
     </footer>
 
+    <script src="solar.js"></script>
     <script src="app.js"></script>
   </body>
 </html>
-

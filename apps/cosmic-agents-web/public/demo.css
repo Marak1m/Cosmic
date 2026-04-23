@@ -1,102 +1,317 @@
 /* =========================================================
    COSMIC AGENTS — Demo Page Styles
-   Extends landing.css (loaded first)
+   Extends landing.css + solar.css (both loaded first).
+
+   Layout policy
+   -------------
+   PRE-LAUNCH (default body state):
+     - Classic hero + prompt form, centered on the cosmic backdrop.
+     - `.mission-only` nodes hidden.
+   MISSION MODE (body.mission-mode after submit):
+     - `.prelaunch-only` nodes hidden.
+     - .demo-main becomes a 2-column grid filling the viewport
+       (solar left, tabbed telemetry rail right).
    ========================================================= */
+
+/* ---------- Mode toggles ---------- */
+body:not(.mission-mode) .mission-only {
+  display: none !important;
+}
+
+body.mission-mode .prelaunch-only {
+  display: none !important;
+}
 
 /* =========================================================
-   COMMUNICATION GRAPH
+   PANEL META (shared)
    ========================================================= */
-.agent-graph {
+.panel-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* =========================================================
+   TASK BRIEF
+   ========================================================= */
+.brief-body {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.brief-summary {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.98rem;
+  line-height: 1.65;
+}
+
+.brief-columns {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(220px, 2fr);
+  gap: 24px;
+}
+
+.brief-label {
+  margin: 0 0 10px 0;
+  color: var(--violet);
+  font-size: 0.74rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.brief-constraints,
+.brief-subtasks {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.brief-constraints li {
   position: relative;
-  height: 300px;
-  border-radius: var(--radius-lg);
+  padding: 8px 12px 8px 26px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--border);
-  background:
-    radial-gradient(ellipse 55% 50% at 50% 50%, rgba(124, 58, 237, 0.06), transparent 70%),
-    rgba(2, 3, 9, 0.65);
-  overflow: hidden;
+  background: rgba(2, 3, 9, 0.45);
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.55;
 }
 
-.graph-lines {
+.brief-constraints li::before {
+  content: '◆';
   position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  z-index: 1;
-  pointer-events: none;
+  left: 10px;
+  top: 8px;
+  color: var(--gold);
+  font-size: 0.7rem;
 }
 
-.graph-node {
+.brief-subtasks li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: rgba(2, 3, 9, 0.45);
+  transition: border-color 0.3s ease, background 0.3s ease;
+}
+
+.brief-subtasks li[data-status="complete"] {
+  border-color: rgba(52, 211, 153, 0.45);
+  background: rgba(52, 211, 153, 0.08);
+}
+
+.brief-subtasks li[data-status="in_progress"] {
+  border-color: rgba(251, 191, 36, 0.45);
+  background: rgba(251, 191, 36, 0.08);
+}
+
+.subtask-status {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid var(--border-bright);
+  margin-top: 2px;
+  position: relative;
+  transition: border-color 0.3s ease, background 0.3s ease;
+}
+
+.brief-subtasks li[data-status="complete"] .subtask-status {
+  border-color: var(--emerald);
+  background: var(--emerald);
+}
+
+.brief-subtasks li[data-status="complete"] .subtask-status::after {
+  content: '';
   position: absolute;
-  left: var(--x);
-  top: var(--y);
-  transform: translate(-50%, -50%);
-  z-index: 2;
-  max-width: 140px;
-  padding: 7px 13px;
-  border-radius: 999px;
-  border: 1px solid var(--border-bright);
-  background: rgba(4, 6, 15, 0.82);
-  color: rgba(234, 238, 252, 0.75);
+  left: 4px;
+  top: 1px;
+  width: 4px;
+  height: 8px;
+  border-right: 2px solid #0a0f1d;
+  border-bottom: 2px solid #0a0f1d;
+  transform: rotate(45deg);
+}
+
+.brief-subtasks li[data-status="in_progress"] .subtask-status {
+  border-color: var(--gold);
+  background: rgba(251, 191, 36, 0.4);
+  animation: subtaskPulse 1.6s ease-in-out infinite;
+}
+
+@keyframes subtaskPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.4); }
+  50% { box-shadow: 0 0 0 5px rgba(251, 191, 36, 0); }
+}
+
+.subtask-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.subtask-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.subtask-id {
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  color: var(--violet);
+  font-weight: 600;
+}
+
+.subtask-assignee {
   font-family: var(--mono);
   font-size: 0.72rem;
-  text-align: center;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
-  transition: border-color 0.25s ease, background 0.25s ease,
-    box-shadow 0.25s ease, color 0.25s ease, transform 0.25s ease;
-}
-
-.graph-node.leader {
-  font-family: var(--display);
-  font-weight: 700;
-  font-size: 0.78rem;
-  border-color: rgba(167, 139, 250, 0.5);
-  background: linear-gradient(135deg, rgba(124, 58, 237, 0.22), rgba(4, 6, 15, 0.85));
-  color: var(--violet);
-}
-
-.graph-node.active {
-  border-color: rgba(167, 139, 250, 0.85);
-  background: rgba(124, 58, 237, 0.18);
-  color: var(--violet);
-  transform: translate(-50%, -50%) scale(1.08);
-  box-shadow: 0 0 22px rgba(167, 139, 250, 0.35), 0 4px 16px rgba(0, 0, 0, 0.5);
-}
-
-.graph-node.receiving {
-  border-color: rgba(34, 211, 238, 0.9);
-  background: rgba(34, 211, 238, 0.14);
   color: var(--cyan);
-  transform: translate(-50%, -50%) scale(1.1);
-  box-shadow: 0 0 20px rgba(34, 211, 238, 0.35), 0 4px 16px rgba(0, 0, 0, 0.5);
 }
 
-/* Arrow paths */
-.graph-arrow {
-  fill: none;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke: var(--violet);
+.subtask-desc {
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.5;
 }
 
-.graph-arrow[data-leader="false"] {
-  stroke: var(--cyan);
+/* =========================================================
+   LEADER HEARTBEAT
+   ========================================================= */
+.heartbeat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
 }
 
-/* Travelling dot */
-.graph-dot {
-  fill: var(--violet);
-  filter: drop-shadow(0 0 5px rgba(167, 139, 250, 0.8));
+.hb-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: rgba(2, 3, 9, 0.5);
+  min-width: 0;
 }
 
-.graph-dot[data-leader="false"] {
-  fill: var(--cyan);
-  filter: drop-shadow(0 0 5px rgba(34, 211, 238, 0.8));
+.hb-label {
+  color: var(--violet);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.hb-label span {
+  color: var(--dim);
+  font-size: 0.68rem;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.hb-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(124, 58, 237, 0.1);
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.hb-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--violet), var(--cyan));
+  transition: width 0.6s cubic-bezier(0.22, 0.6, 0.3, 1);
+}
+
+#hb-coverage-fill {
+  background: linear-gradient(90deg, var(--violet), var(--cyan));
+}
+
+#hb-consistency-fill {
+  background: linear-gradient(90deg, var(--rose), var(--gold));
+}
+
+.hb-value {
+  color: var(--ink);
+  font-size: 0.86rem;
+  letter-spacing: 0.04em;
+}
+
+.hb-stable {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-bright);
+  background: rgba(2, 3, 9, 0.6);
+  color: var(--muted);
+  font-size: 0.78rem;
+  align-self: flex-start;
+  transition: border-color 0.3s ease, background 0.3s ease, color 0.3s ease;
+}
+
+.hb-stable[data-stable="yes"] {
+  border-color: rgba(52, 211, 153, 0.5);
+  background: rgba(52, 211, 153, 0.12);
+  color: var(--emerald);
+}
+
+.hb-stable[data-stable="yes"]::before {
+  content: '✓';
+  color: var(--emerald);
+}
+
+.hb-stable[data-stable="no"]::before {
+  content: '~';
+  color: var(--dim);
+}
+
+.hb-inconsistencies {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.hb-inconsistencies:empty {
+  display: none;
+}
+
+.hb-inconsistencies li {
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(244, 63, 94, 0.35);
+  background: rgba(244, 63, 94, 0.08);
+  color: var(--ink);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.hb-inconsistencies li::before {
+  content: '! ';
+  color: var(--rose);
+  font-weight: 700;
 }
 
 /* =========================================================
@@ -140,7 +355,7 @@
 }
 
 /* =========================================================
-   DEMO LAYOUT
+   DEMO LAYOUT — pre-launch
    ========================================================= */
 .demo-main {
   padding: 48px clamp(18px, 6vw, 72px) 96px;
@@ -156,6 +371,159 @@
   align-items: start;
   gap: 32px;
   margin-bottom: 12px;
+}
+
+/* =========================================================
+   DEMO LAYOUT — mission mode
+   ========================================================= */
+body.mission-mode .demo-main {
+  max-width: none;
+  width: 100%;
+  padding: 16px clamp(14px, 2.4vw, 28px) 16px;
+  display: block;
+  height: calc(100vh - 68px);
+  margin: 0;
+  box-sizing: border-box;
+}
+
+body.mission-mode .mission-stage {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(420px, 2fr);
+  gap: 16px;
+  height: 100%;
+  min-height: 0;
+}
+
+body.mission-mode .solar-panel {
+  min-height: 0;
+  overflow: hidden;
+}
+
+body.mission-mode .solar-panel .solar-system {
+  height: 100%;
+  flex: 1 1 auto;
+  min-height: 320px;
+}
+
+body.mission-mode .panel {
+  min-height: 0;
+}
+
+@media (max-width: 1024px) {
+  body.mission-mode .demo-main {
+    height: auto;
+  }
+  body.mission-mode .mission-stage {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  body.mission-mode .solar-panel .solar-system {
+    height: 420px;
+  }
+}
+
+/* =========================================================
+   MISSION RAIL + TABS
+   ========================================================= */
+.mission-rail {
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow-md), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  overflow: hidden;
+  min-height: 0;
+}
+
+.mission-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 10px 10px 0 10px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.mission-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.mission-tab {
+  position: relative;
+  padding: 10px 14px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.2s ease, background 0.2s ease, border-color 0.2s ease;
+}
+
+.mission-tab:hover {
+  color: var(--ink);
+  background: rgba(167, 139, 250, 0.06);
+}
+
+.mission-tab.active {
+  color: var(--violet);
+  border-color: var(--border);
+  background: rgba(124, 58, 237, 0.12);
+}
+
+.mission-tab[data-flash="1"] {
+  animation: tabFlash 1s ease-in-out 3;
+}
+
+@keyframes tabFlash {
+  0%, 100% { color: var(--muted); }
+  50% { color: var(--gold); text-shadow: 0 0 8px rgba(251, 191, 36, 0.6); }
+}
+
+.mission-panels {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.mission-panel {
+  position: absolute;
+  inset: 0;
+  padding: 18px 20px 20px;
+  display: none;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.1) transparent;
+}
+
+.mission-panel::-webkit-scrollbar { width: 5px; }
+.mission-panel::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+}
+
+.mission-rail[data-tab="dialogue"]  .mission-panel[data-tab="dialogue"],
+.mission-rail[data-tab="brief"]     .mission-panel[data-tab="brief"],
+.mission-rail[data-tab="heartbeat"] .mission-panel[data-tab="heartbeat"],
+.mission-rail[data-tab="crew"]      .mission-panel[data-tab="crew"],
+.mission-rail[data-tab="final"]     .mission-panel[data-tab="final"] {
+  display: flex;
+}
+
+/* Inside mission panels, headers/chat/feed should behave the same
+   visually as standalone panels did. */
+.mission-panel .panel-header {
+  padding: 0 0 12px 0;
+  border-bottom: 1px solid var(--border);
+  margin: 0;
 }
 
 /* =========================================================
@@ -219,7 +587,7 @@
 }
 
 /* =========================================================
-   PANELS
+   PANELS (base)
    ========================================================= */
 .panel {
   border-radius: var(--radius-xl);
@@ -290,7 +658,6 @@
   border-radius: var(--radius-lg) var(--radius-lg) 0 0;
 }
 
-/* Leader card (always first child) */
 .agent-grid .agent-card:first-child {
   border-color: rgba(167, 139, 250, 0.25);
   background: linear-gradient(160deg, rgba(124, 58, 237, 0.1), rgba(2, 3, 9, 0.6));
@@ -363,7 +730,8 @@
    CHAT FEED
    ========================================================= */
 .chat-feed {
-  max-height: 460px;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -371,6 +739,10 @@
   padding-right: 4px;
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.1) transparent;
+}
+
+body:not(.mission-mode) .chat-feed {
+  max-height: 460px;
 }
 
 .chat-feed::-webkit-scrollbar {
@@ -582,5 +954,13 @@
 
   .agent-grid {
     grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  }
+
+  .heartbeat-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .brief-columns {
+    grid-template-columns: 1fr;
   }
 }
