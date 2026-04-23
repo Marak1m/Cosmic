@@ -51,16 +51,36 @@ const OPENAI_API_KEY = normalizeApiKey(process.env.OPENAI_API_KEY);
 // feels as the run stalling between speakers. Per the COSMIC design,
 // only the Leader's heartbeat check-in and the Finalizer need deep
 // reasoning; everyone else just needs to be coherent and responsive.
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
-const PLANNER_MODEL = process.env.PLANNER_MODEL || "gpt-4o-mini";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.4-mini";
+const PLANNER_MODEL = process.env.PLANNER_MODEL || "gpt-5.4-mini";
+// LEADER_MODEL is the "careful reasoning" brand. We used to route
+// every Leader-related call through it (task brief, heartbeat,
+// every conversational Leader turn), which added 20-60s per run
+// to paths that didn't need deep reasoning. Now it's used ONLY as
+// the default for HEARTBEAT_MODEL below — the single o1 call per
+// COSMIC_T_LEADER turns. The finalizer stays on FINALIZER_MODEL.
 const LEADER_MODEL = process.env.LEADER_MODEL || "o1";
+// Conversational Leader turns (non-heartbeat). Picks up the Leader's
+// voice for coordination, nominations, and constraint-checking during
+// the main loop. gpt-5.4-mini is plenty here: the decisions are local
+// (who speaks next, is this constraint satisfied) and o1's hidden
+// reasoning adds 10-30s per turn with no visible quality gain.
+const LEADER_CHAT_MODEL = process.env.LEADER_CHAT_MODEL || OPENAI_MODEL;
+// Task Brief D (t=0) is structured JSON decomposition, not reasoning.
+// o1 added 8-12s to a call a fast model handles in 1-2s.
+const TASK_BRIEF_MODEL = process.env.TASK_BRIEF_MODEL || OPENAI_MODEL;
+// Heartbeat scoring (every COSMIC_T_LEADER turns) needs careful
+// judgment on coverage/consistency/termination — this is where o1
+// actually earns its latency. Default to LEADER_MODEL so the
+// reasoning brand stays wired here.
+const HEARTBEAT_MODEL = process.env.HEARTBEAT_MODEL || LEADER_MODEL;
 // Fast, cheap model for the speaker-selection loop. Algorithm 1's
 // nomination fast-path already short-circuits ~50% of turns without
 // a model call; o1 on the remaining turns added 10-30s of wall-clock
-// latency per step. gpt-4o-mini gets us sub-2s selection without
+// latency per step. gpt-5.4-mini gets us sub-2s selection without
 // materially changing which agent is chosen. Override with env if
 // you want to A/B against o1 / gpt-5-family.
-const SELECTOR_MODEL = process.env.SELECTOR_MODEL || "gpt-4o-mini";
+const SELECTOR_MODEL = process.env.SELECTOR_MODEL || "gpt-5.4-mini";
 const FINALIZER_MODEL = process.env.FINALIZER_MODEL || "o1";
 const ENABLE_PROMPT_OPTIMIZER = normalizeBoolean(process.env.ENABLE_PROMPT_OPTIMIZER);
 const OPTIMIZER_MODEL = process.env.OPTIMIZER_MODEL || OPENAI_MODEL;
@@ -231,7 +251,7 @@ if (!SERPER_API_KEY || SERPER_API_KEY.length < 10) {
 }
 
 console.log(
-  `Models: OPENAI_MODEL=${OPENAI_MODEL} | PLANNER_MODEL=${PLANNER_MODEL} | OPTIMIZER_MODEL=${OPTIMIZER_MODEL} (enabled=${ENABLE_PROMPT_OPTIMIZER}) | CLARIFIER_MODEL=${CLARIFIER_MODEL} (enabled=${ENABLE_USER_CLARIFICATIONS}, max_q=${MAX_CLARIFICATION_QUESTIONS}) | LEADER_MODEL=${LEADER_MODEL} | SELECTOR_MODEL=${SELECTOR_MODEL} | FINALIZER_MODEL=${FINALIZER_MODEL} | MAX_TURNS=${MAX_TURNS} | MEMORY_WINDOW=${MEMORY_WINDOW}`
+  `Models: OPENAI_MODEL=${OPENAI_MODEL} | PLANNER_MODEL=${PLANNER_MODEL} | OPTIMIZER_MODEL=${OPTIMIZER_MODEL} (enabled=${ENABLE_PROMPT_OPTIMIZER}) | CLARIFIER_MODEL=${CLARIFIER_MODEL} (enabled=${ENABLE_USER_CLARIFICATIONS}, max_q=${MAX_CLARIFICATION_QUESTIONS}) | LEADER_MODEL=${LEADER_MODEL} | LEADER_CHAT_MODEL=${LEADER_CHAT_MODEL} | TASK_BRIEF_MODEL=${TASK_BRIEF_MODEL} | HEARTBEAT_MODEL=${HEARTBEAT_MODEL} | SELECTOR_MODEL=${SELECTOR_MODEL} | FINALIZER_MODEL=${FINALIZER_MODEL} | MAX_TURNS=${MAX_TURNS} | MEMORY_WINDOW=${MEMORY_WINDOW}`
 );
 
 // (Task templates removed; crew is planned dynamically per prompt.)
@@ -722,11 +742,11 @@ async function generateTaskBrief(userPrompt, agents, leaderFocus, taskSummary) {
         { role: "user", content: userMessage },
       ],
       {
-        model: LEADER_MODEL,
+        model: TASK_BRIEF_MODEL,
         temperature: 0.2,
-        reasoning_effort: isO1Model(LEADER_MODEL) ? "low" : undefined,
-        max_tokens: LEADER_MAX_OUTPUT_TOKENS,
-        response_format: isO1Model(LEADER_MODEL) ? undefined : { type: "json_object" },
+        reasoning_effort: isO1Model(TASK_BRIEF_MODEL) ? "low" : undefined,
+        max_tokens: PLANNER_MAX_OUTPUT_TOKENS,
+        response_format: isO1Model(TASK_BRIEF_MODEL) ? undefined : { type: "json_object" },
       }
     );
     brief = safeJsonParse(text);
@@ -799,11 +819,17 @@ function parseNomination(lastEntry, candidateNames) {
   const tail = content.split(/\r?\n/).slice(-15).join("\n");
   const candidates = candidateNames.map((n) => ({ name: n, lower: n.toLowerCase() }));
 
-  // Prefer the last explicit "Next speaker: X" line.
+  // Prefer the last explicit "Next speaker: X" line. Wider patterns
+  // here mean more turns short-circuit the selector LLM call (Algorithm 1
+  // fast-path); every hit saves ~1-2s of wall-clock latency per turn.
   const explicitPatterns = [
     /next\s+speaker\s*[:\-]\s*([A-Za-z0-9_]+)/i,
-    /(?:pass|hand\s*over|hand\s*off)\s+to\s+([A-Za-z0-9_]+)/i,
-    /([A-Za-z0-9_]+)\s*,?\s*please\s+(?:go|respond|take\s+over|continue)/i,
+    /(?:pass|hand\s*over|hand\s*off|turning\s+(?:this|it)\s+over|over)\s+to\s+([A-Za-z0-9_]+)/i,
+    /(?:→|->|=>)\s*([A-Za-z0-9_]+)/,
+    /@([A-Za-z][A-Za-z0-9_]{1,64})\b/,
+    /([A-Za-z0-9_]+)\s*,?\s*please\s+(?:go|respond|take\s+over|continue|proceed|weigh\s+in|chime\s+in)/i,
+    /([A-Za-z0-9_]+)\s*,?\s*(?:your\s+turn|you're\s+up|you\s+are\s+up|over\s+to\s+you)/i,
+    /(?:asking|addressing|handing\s+off\s+to|calling\s+on|nominating)\s+([A-Za-z0-9_]+)/i,
     /\*\*([A-Za-z0-9_]+)\*\*\s*:/,
   ];
   for (const re of [...explicitPatterns].reverse()) {
@@ -996,11 +1022,11 @@ async function leaderHeartbeat(brief, mem, prevScores, userPrompt) {
         { role: "user", content: userMessage },
       ],
       {
-        model: LEADER_MODEL,
+        model: HEARTBEAT_MODEL,
         temperature: 0.1,
-        reasoning_effort: isO1Model(LEADER_MODEL) ? "low" : undefined,
+        reasoning_effort: isO1Model(HEARTBEAT_MODEL) ? "low" : undefined,
         max_tokens: LEADER_MAX_OUTPUT_TOKENS,
-        response_format: isO1Model(LEADER_MODEL) ? undefined : { type: "json_object" },
+        response_format: isO1Model(HEARTBEAT_MODEL) ? undefined : { type: "json_object" },
       }
     );
     parsed = safeJsonParse(text);
@@ -1099,6 +1125,10 @@ app.get(["/demo", "/demo/"], (req, res) => {
   res.sendFile(path.join(__dirname, "public", "demo.html"));
 });
 
+app.get(["/how", "/how/", "/how-it-works"], (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "how.html"));
+});
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws" });
 
@@ -1121,6 +1151,53 @@ function send(ws, payload) {
   if (ws.readyState === ws.OPEN) {
     ws.send(JSON.stringify(payload));
   }
+}
+
+// WS delta batcher: coalesces per-token streaming deltas into ~50ms
+// batches. OpenAI streams tokens at ~50-80/sec; sending one WS frame
+// per token was consuming 3-6s of wall-clock overhead per agent turn
+// (JSON.stringify + ws.send + network serialize on every token).
+// Batching drops that to one frame per ~3-5 tokens with no visible
+// lag — user still sees smooth streaming. Returns { onDelta, flush };
+// callers MUST call flush() when the stream ends so the tail doesn't
+// sit buffered for up to BATCH_MS.
+const DELTA_BATCH_MS = 50;
+function createDeltaBatcher(streamContext, name) {
+  if (!streamContext?.ws || !streamContext?.runId || !streamContext?.messageId) {
+    return { onDelta: undefined, flush: () => {} };
+  }
+  let buffer = "";
+  let timer = null;
+  const flushNow = () => {
+    if (!buffer) {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      return;
+    }
+    const payload = buffer;
+    buffer = "";
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    send(streamContext.ws, {
+      type: "message_delta",
+      runId: streamContext.runId,
+      id: streamContext.messageId,
+      name,
+      delta: payload,
+    });
+  };
+  const onDelta = (delta) => {
+    if (!delta) return;
+    buffer += delta;
+    if (!timer) {
+      timer = setTimeout(flushNow, DELTA_BATCH_MS);
+    }
+  };
+  return { onDelta, flush: flushNow };
 }
 
 function safeJsonParse(text) {
@@ -1908,17 +1985,8 @@ async function generateAgentReply(agent, mem, brief, streamContext = null) {
     promptNeedsWebSearch(userPrompt) &&
     Number(agent.toolUseCount || 0) === 0;
 
-  const onDelta =
-    streamContext?.ws && streamContext?.runId && streamContext?.messageId
-      ? (delta) =>
-          send(streamContext.ws, {
-            type: "message_delta",
-            runId: streamContext.runId,
-            id: streamContext.messageId,
-            name: agent.name,
-            delta,
-          })
-      : undefined;
+  const deltaBatch = createDeltaBatcher(streamContext, agent.name);
+  const onDelta = deltaBatch.onDelta;
 
   const canForceToolChoice = modelToolForceSupported.get(model) !== false;
 
@@ -2031,6 +2099,9 @@ async function generateAgentReply(agent, mem, brief, streamContext = null) {
 
       const groundedText = normalizeText(grounded.content).trim();
       if (groundedText) {
+        // Early-return path: flush any tokens still buffered from the
+        // original streamed response before yielding the grounded reply.
+        deltaBatch.flush();
         return groundedText;
       }
     } catch (error) {
@@ -2102,6 +2173,9 @@ async function generateAgentReply(agent, mem, brief, streamContext = null) {
     }
   }
 
+  // Flush any buffered delta tail so the user sees the last ~50ms
+  // of tokens even if they arrived too late to trigger another batch.
+  deltaBatch.flush();
   return finalText;
 }
 
@@ -2115,7 +2189,14 @@ async function generateFinalAnswer(prompt, history, streamContext = null) {
         content: e.content,
       }))
     : [];
-  const transcript = buildTranscript(normalizedHistory, MAX_INPUT_CHARS);
+  // Pre-trim to ~60% of the input-char budget. MAX_INPUT_CHARS is the
+  // hard server cap; sending right up to it meant the OpenAI side often
+  // rejected with context_length_exceeded (system+user+prompt_overhead
+  // pushed past the model window), forcing a retry-trim cycle that cost
+  // 5-15s per run. 60% leaves comfortable headroom for the system prompt
+  // + reasoning overhead on o1 without losing meaningful transcript.
+  const FINALIZER_TRANSCRIPT_CHARS = Math.floor(MAX_INPUT_CHARS * 0.6);
+  const transcript = buildTranscript(normalizedHistory, FINALIZER_TRANSCRIPT_CHARS);
   const systemPrompt = [
     "You are the COSMIC Final Answer Synthesizer.",
     "Every specialist in the transcript did real research. Your job is to",
@@ -2157,17 +2238,8 @@ async function generateFinalAnswer(prompt, history, streamContext = null) {
     "is expecting the full plan, not a summary.",
   ].join("\n");
 
-  const onDelta =
-    streamContext?.ws && streamContext?.runId && streamContext?.messageId
-      ? (delta) =>
-          send(streamContext.ws, {
-            type: "message_delta",
-            runId: streamContext.runId,
-            id: streamContext.messageId,
-            name: LEADER_NAME,
-            delta,
-          })
-      : undefined;
+  const deltaBatch = createDeltaBatcher(streamContext, LEADER_NAME);
+  const onDelta = deltaBatch.onDelta;
 
   const message = await callOpenAIChatRawWithFallback(
     [
@@ -2188,6 +2260,9 @@ async function generateFinalAnswer(prompt, history, streamContext = null) {
     }
   );
 
+  // Flush trailing buffered tokens so the user sees the tail of the
+  // finalizer's synthesis without the 50ms batching delay.
+  deltaBatch.flush();
   return ensureTerminateAtEnd((message.content || "").trim());
 }
 
@@ -2346,7 +2421,10 @@ async function runConversationCoreInner(finalPrompt, ws, runId) {
     name: LEADER_NAME,
     role: "Leader",
     focus: leaderFocus,
-    model: LEADER_MODEL,
+    // Conversational Leader turns run on LEADER_CHAT_MODEL (fast).
+    // The heavyweight o1 call happens separately in leaderHeartbeat
+    // via HEARTBEAT_MODEL every COSMIC_T_LEADER turns.
+    model: LEADER_CHAT_MODEL,
     toolUseCount: 0,
     systemPrompt: buildLeaderPrompt(agentNames, leaderFocus, taskSummary),
   };

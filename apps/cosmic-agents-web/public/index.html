@@ -15,9 +15,8 @@
       rel="stylesheet"
     />
     <link rel="stylesheet" href="landing.css" />
-    <link rel="stylesheet" href="solar.css" />
   </head>
-  <body>
+  <body class="landing-minimal">
     <div class="space" aria-hidden="true">
       <div class="stars"></div>
       <div class="nebula"></div>
@@ -27,92 +26,36 @@
     <header class="top-nav" data-reveal>
       <a class="logo" href="/" aria-label="Cosmic home">cosmic</a>
       <nav class="nav-links" aria-label="Primary">
-        <a href="#how">How it works</a>
+        <a href="/how">How it works</a>
         <a class="nav-cta" href="/demo">Demo</a>
       </nav>
       <a class="btn primary small" href="/demo">Launch demo</a>
     </header>
 
-    <main>
-      <section class="hero">
-        <div class="hero-copy" data-reveal>
-          <p class="eyebrow">Autonomous swarm intelligence</p>
-          <h1>Multi-agent collaboration, engineered to converge.</h1>
-          <p class="lead">A governed research crew that outputs one validated final answer.</p>
+    <main class="landing-main">
+      <!-- Single-column, centered hero. The heading is the whole page
+           above the fold: no side figure means long words like
+           "collaboration" and "converge" can't intersect an adjacent
+           panel and be clipped underneath it. -->
+      <section class="hero-center" data-reveal>
+        <p class="eyebrow eyebrow-center">Autonomous swarm intelligence</p>
+        <h1 class="hero-title">Multi-agent collaboration, engineered to converge.</h1>
+        <p class="lead lead-center">
+          A governed research crew that outputs one validated final answer.
+        </p>
 
-          <div class="hero-actions">
-            <a class="btn primary" href="/demo">Run the demo</a>
-            <a class="btn secondary" href="#how">Learn more</a>
-          </div>
-
-          <p class="hero-mantra mono">
-            Multi-Agent Collaboration. Collective Intelligence. Infinite Possibilities.
-          </p>
+        <div class="hero-actions hero-actions-center">
+          <a class="btn primary" href="/demo">Run the demo</a>
+          <a class="btn secondary" href="/how">How it works</a>
         </div>
 
-        <div class="hero-visual" data-reveal>
-          <div class="orbit-card">
-            <div class="orbit-title">
-              <span class="pill">Live topology</span>
-              <span class="mono">Leader + specialists in orbit</span>
-            </div>
-
-            <div
-              class="solar-system landing-solar"
-              id="landing-solar"
-              aria-label="Animated multi-agent solar system"
-            ></div>
-
-            <div class="orbit-caption">
-              <div class="mono" id="orbit-caption">
-                One Leader. Many specialists. One converged answer.
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="section" id="how">
-        <div class="section-heading" data-reveal>
-          <h2>How it works</h2>
-          <p>Structure over chaos. Convergence over chatter.</p>
-        </div>
-
-        <ol class="steps steps-minimal">
-          <li class="step" data-reveal>
-            <div class="step-index">1</div>
-            <div class="step-body">
-              <h3>Spawn specialists</h3>
-              <p>A planner hires a task-specific crew.</p>
-            </div>
-          </li>
-          <li class="step" data-reveal>
-            <div class="step-index">2</div>
-            <div class="step-body">
-              <h3>Route every turn</h3>
-              <p>SSA chooses the next speaker by exact name.</p>
-            </div>
-          </li>
-          <li class="step" data-reveal>
-            <div class="step-index">3</div>
-            <div class="step-body">
-              <h3>Converge + finalize</h3>
-              <p>Shared memory aligns everyone; the output ends with <span class="mono">TERMINATE</span>.</p>
-            </div>
-          </li>
-        </ol>
-
-        <div class="cta-banner" data-reveal>
-          <div>
-            <h3>Watch the swarm think.</h3>
-            <p>Run the demo and see coordination happen in real time.</p>
-          </div>
-          <a class="btn primary" href="/demo">Launch demo</a>
-        </div>
+        <p class="hero-mantra mono hero-mantra-center">
+          Multi-Agent Collaboration. Collective Intelligence. Infinite Possibilities.
+        </p>
       </section>
     </main>
 
-    <footer class="footer" data-reveal>
+    <footer class="footer footer-minimal" data-reveal>
       <div class="footer-inner">
         <div>
           <div class="logo small">cosmic</div>
@@ -120,7 +63,7 @@
         </div>
         <div class="footer-links">
           <a href="/demo">Demo</a>
-          <a href="#how">How it works</a>
+          <a href="/how">How it works</a>
         </div>
       </div>
       <p class="footer-bottom">cosmic-agents.com</p>
@@ -144,7 +87,5 @@
         });
       })();
     </script>
-    <script src="solar.js"></script>
-    <script src="landing.js"></script>
   </body>
 </html>

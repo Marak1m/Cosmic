@@ -367,10 +367,48 @@ body.mission-mode .prelaunch-only {
   width: 100%;
 }
 
+/* Pre-launch hero: single column, centered. The form sits below the
+   headline with its own max-width so long words in the h1 never share
+   horizontal space with the prompt form panel. */
 .demo-hero {
-  align-items: start;
-  gap: 32px;
-  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 36px;
+  margin: clamp(24px, 6vh, 64px) auto 12px;
+  width: 100%;
+  max-width: 780px;
+  padding: 0 clamp(8px, 2vw, 24px);
+  box-sizing: border-box;
+}
+
+.demo-hero-copy {
+  text-align: center;
+  max-width: 680px;
+  width: 100%;
+}
+
+.demo-hero-title {
+  font-family: var(--display);
+  font-size: clamp(2.2rem, 4.4vw, 3.8rem);
+  font-weight: 800;
+  margin: 0 0 20px;
+  line-height: 1.06;
+  letter-spacing: -0.02em;
+  background: linear-gradient(140deg, #eaeefc 0%, var(--violet) 50%, var(--cyan) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 20ch;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.demo-hero .prompt-form {
+  width: 100%;
+  max-width: 680px;
 }
 
 /* =========================================================

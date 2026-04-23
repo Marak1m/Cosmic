@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>How it works — cosmic</title>
+    <meta
+      name="description"
+      content="How Cosmic Agents works: a governed Leader + specialist topology, structured speaker selection, and bounded shared memory that converges to one final answer."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=Space+Grotesk:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="landing.css" />
+    <link rel="stylesheet" href="solar.css" />
+    <link rel="stylesheet" href="how.css" />
+  </head>
+  <body>
+    <div class="space" aria-hidden="true">
+      <div class="stars"></div>
+      <div class="nebula"></div>
+      <div class="gridglow"></div>
+    </div>
+
+    <header class="top-nav" data-reveal>
+      <a class="logo" href="/" aria-label="Cosmic home">cosmic</a>
+      <nav class="nav-links" aria-label="Primary">
+        <a href="/">Home</a>
+        <a class="nav-cta" href="/demo">Demo</a>
+      </nav>
+      <a class="btn primary small" href="/demo">Launch demo</a>
+    </header>
+
+    <main class="how-main">
+      <!-- Centered intro, same minimalist treatment as the landing -->
+      <section class="how-intro" data-reveal>
+        <p class="eyebrow eyebrow-center">How it works</p>
+        <h1 class="how-title">Structure over chaos. Convergence over chatter.</h1>
+        <p class="lead lead-center">
+          Cosmic turns a single prompt into a small crew of specialists orbiting
+          one Leader. Turns are routed, memory is bounded, and the run ends the
+          moment the answer is good enough.
+        </p>
+      </section>
+
+      <!-- Solar system figure as the centerpiece, on its own -->
+      <section class="how-figure" data-reveal>
+        <div class="orbit-card">
+          <div class="orbit-title">
+            <span class="pill">Live topology</span>
+            <span class="mono">Leader + specialists in orbit</span>
+          </div>
+          <div
+            class="solar-system how-solar"
+            id="how-solar"
+            aria-label="Animated multi-agent solar system"
+          ></div>
+          <div class="orbit-caption">
+            <div class="mono">One Leader. Many specialists. One converged answer.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Numbered narrative of what actually happens on every run -->
+      <section class="how-steps" data-reveal>
+        <ol class="steps steps-how">
+          <li class="step">
+            <div class="step-index">1</div>
+            <div class="step-body">
+              <h3>Plan the crew</h3>
+              <p>
+                A planner reads your prompt and hires up to five specialists plus
+                a Leader — each with a narrow focus and the tools it needs.
+              </p>
+            </div>
+          </li>
+          <li class="step">
+            <div class="step-index">2</div>
+            <div class="step-body">
+              <h3>Emit the Task Brief</h3>
+              <p>
+                The Leader's first turn is a structured brief <span class="mono">D</span>:
+                objective, constraints, and 3–6 subtasks assigned to specialists.
+                Pinned outside rolling memory so it's always in context.
+              </p>
+            </div>
+          </li>
+          <li class="step">
+            <div class="step-index">3</div>
+            <div class="step-body">
+              <h3>Route every turn</h3>
+              <p>
+                A Structured Speaker Allocator (SSA) picks the next agent — either
+                by explicit nomination in the previous message, or by a small
+                selector call scoring candidates on dependency-readiness, peer
+                references, and topic fit.
+              </p>
+            </div>
+          </li>
+          <li class="step">
+            <div class="step-index">4</div>
+            <div class="step-body">
+              <h3>Share bounded memory</h3>
+              <p>
+                All agents read from one rolling FIFO window
+                <span class="mono">M<sub>t</sub></span>. Peers can reference each
+                other ("Building on Flight_Routing_Analyst's routing…") and flag
+                real conflicts across subtasks.
+              </p>
+            </div>
+          </li>
+          <li class="step">
+            <div class="step-index">5</div>
+            <div class="step-body">
+              <h3>Heartbeat + terminate</h3>
+              <p>
+                Every few turns the Leader scores coverage <span class="mono">C(t)</span>,
+                consistency <span class="mono">H(t)</span>, and stability
+                <span class="mono">τ</span>. When the crew converges, the Leader
+                emits <span class="mono">TERMINATE</span> and a synthesizer produces
+                the final user-facing answer.
+              </p>
+            </div>
+          </li>
+        </ol>
+      </section>
+
+      <section class="how-cta" data-reveal>
+        <div class="cta-banner">
+          <div>
+            <h3>Watch the swarm think.</h3>
+            <p>Run the demo and see coordination happen in real time.</p>
+          </div>
+          <a class="btn primary" href="/demo">Launch demo</a>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer" data-reveal>
+      <div class="footer-inner">
+        <div>
+          <div class="logo small">cosmic</div>
+          <p class="footer-note">Autonomous collective intelligence, engineered to converge.</p>
+        </div>
+        <div class="footer-links">
+          <a href="/">Home</a>
+          <a href="/demo">Demo</a>
+        </div>
+      </div>
+      <p class="footer-bottom">cosmic-agents.com</p>
+    </footer>
+
+    <script>
+      (function () {
+        var obs = new IntersectionObserver(
+          function (entries) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting) {
+                e.target.classList.add('reveal');
+                obs.unobserve(e.target);
+              }
+            });
+          },
+          { threshold: 0.08, rootMargin: '0px 0px -32px 0px' }
+        );
+        document.querySelectorAll('[data-reveal]').forEach(function (el) {
+          obs.observe(el);
+        });
+      })();
+    </script>
+    <script src="solar.js"></script>
+    <script src="how.js"></script>
+  </body>
+</html>
