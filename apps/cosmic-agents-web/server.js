@@ -62,19 +62,22 @@ const MAX_CLARIFICATION_QUESTIONS = Math.min(
 const SERPER_API_KEY = normalizeApiKey(process.env.SERPER_API_KEY);
 const OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions";
 const ENABLE_STREAMING = normalizeBoolean(process.env.ENABLE_STREAMING ?? "true");
-const ENABLE_MEMORY_SUMMARY = normalizeBoolean(process.env.ENABLE_MEMORY_SUMMARY ?? "true");
-const SUMMARY_MODEL = process.env.SUMMARY_MODEL || OPENAI_MODEL;
-const SUMMARY_TRIGGER_CHARS = readIntEnv("SUMMARY_TRIGGER_CHARS", 60000, { min: 12000, max: 500000 });
-const SUMMARY_MIN_TURNS_BETWEEN = readIntEnv("SUMMARY_MIN_TURNS_BETWEEN", 8, { min: 2, max: 50 });
 const SEARCH_CACHE_TTL_MS = readIntEnv("SEARCH_CACHE_TTL_MS", 10 * 60 * 1000, { min: 0, max: 24 * 60 * 60 * 1000 });
 const SEARCH_CACHE_MAX_ENTRIES = readIntEnv("SEARCH_CACHE_MAX_ENTRIES", 200, { min: 0, max: 2000 });
 const SEARCH_BATCH_MAX_QUERIES = readIntEnv("SEARCH_BATCH_MAX_QUERIES", 3, { min: 1, max: 6 });
 
 const MAX_AGENTS = 5;
-const MAX_TURNS = 50;
-const MEMORY_WINDOW = 50;
+const MAX_TURNS = readIntEnv("MAX_TURNS", 50, { min: 6, max: 200 });
 const LEADER_NAME = "Leader";
-const LEADER_CHECKIN_INTERVAL = readIntEnv("LEADER_CHECKIN_INTERVAL", 10, { min: 3, max: 25 });
+
+// COSMIC coordination hyperparameters (see COSMIC paper §III)
+const COSMIC_N = readIntEnv("COSMIC_MEMORY_N", 10, { min: 4, max: 40 });              // rolling window size N
+const COSMIC_T_LEADER = readIntEnv("LEADER_CHECKIN_INTERVAL", 7, { min: 3, max: 20 }); // T_leader heartbeat
+const COSMIC_THETA_H = Number(process.env.COSMIC_THETA_H || 0.8);                      // consistency threshold
+const COSMIC_EPS_C = Number(process.env.COSMIC_EPS_C || 0.1);                          // coverage stability eps
+const COSMIC_EPS_H = Number(process.env.COSMIC_EPS_H || 0.1);                          // consistency stability eps
+// Kept for backwards compatibility with legacy env (not used by the COSMIC core):
+const MEMORY_WINDOW = COSMIC_N;
 
 const MAX_INPUT_TOKENS = readIntEnv("MAX_INPUT_TOKENS", 25000, { min: 1000, max: 100000 });
 const MAX_OUTPUT_TOKENS = readIntEnv("MAX_OUTPUT_TOKENS", 25000, { min: 256, max: 25000 });
@@ -560,92 +563,499 @@ function applyWebSearchAssignment(agentSpecs, userPrompt, maxToolAgents = 2) {
   });
 }
 
-function initAgentMemory(agents) {
-  const memoryMap = new Map();
-  for (const agent of agents) {
-    memoryMap.set(agent.name, []);
-  }
+// ─────────────────────────────────────────────────────────────
+// COSMIC core: shared memory, task brief, SSA, heartbeat
+// (See COSMIC paper §III and task-healthcare.ipynb.)
+// ─────────────────────────────────────────────────────────────
+
+// M_t: FIFO rolling shared-memory buffer of the last N agent messages.
+function createSharedMemory(size = COSMIC_N) {
   return {
-    map: memoryMap,
-    cursor: 0,
-    summary: "",
-    lastSummaryTurn: -1,
-    lastSummaryHistoryLen: 0,
+    size,
+    entries: [], // [{ name, role, content, turn, isTool? }]
+    full: [],    // full transcript for final answer + UI replay (never truncated in-place)
   };
 }
 
-function syncAgentMemory(history, memoryState) {
-  if (!memoryState) {
-    return;
+// Append a new message to M_t, drop oldest if > N.
+function appendMemory(mem, entry) {
+  mem.entries.push(entry);
+  mem.full.push(entry);
+  while (mem.entries.length > mem.size) {
+    mem.entries.shift();
   }
-  for (let i = memoryState.cursor; i < history.length; i += 1) {
-    const message = history[i];
-    if (!message || message.role === "tool") {
-      continue;
-    }
-    for (const memory of memoryState.map.values()) {
-      memory.push({ role: message.role, name: message.name, content: message.content });
-    }
-  }
-  memoryState.cursor = history.length;
 }
 
-function estimateHistoryChars(history) {
-  if (!Array.isArray(history)) return 0;
-  let total = 0;
-  for (const message of history) {
-    total += estimateMessageChars(message);
+// Convert M_t entries into chat-completion messages for a specialist.
+// The task brief D is always prepended as a pinned system message.
+function memoryToChatMessages(mem, brief) {
+  const msgs = [];
+  if (brief) {
+    msgs.push({ role: "system", content: formatTaskBriefForPrompt(brief) });
   }
-  return total;
+  for (const entry of mem.entries) {
+    msgs.push({
+      role: entry.role === "user" ? "user" : "assistant",
+      name: entry.name,
+      content: `${entry.name}: ${entry.content}`,
+    });
+  }
+  return msgs;
 }
 
-async function maybeUpdateMemorySummary(history, memoryState, turn, ws, runId) {
-  if (!ENABLE_MEMORY_SUMMARY || !memoryState) return;
-  if (turn - (memoryState.lastSummaryTurn ?? -1) < SUMMARY_MIN_TURNS_BETWEEN) return;
-  if (history.length - (memoryState.lastSummaryHistoryLen || 0) < 8) return;
-
-  const approxChars = estimateHistoryChars(history);
-  if (approxChars < SUMMARY_TRIGGER_CHARS) return;
-
-  if (ws && runId) {
-    send(ws, { type: "status", runId, message: "Compressing shared memory for speed..." });
+// Recency vector r_t: turns since each candidate last spoke.
+function recencyVector(mem, agentNames) {
+  const lastTurnByAgent = new Map();
+  for (const entry of mem.full) {
+    if (typeof entry.turn === "number" && entry.name) {
+      lastTurnByAgent.set(entry.name, entry.turn);
+    }
   }
+  const currentTurn = mem.full.length - 1;
+  const r = new Map();
+  for (const name of agentNames) {
+    const last = lastTurnByAgent.has(name) ? lastTurnByAgent.get(name) : -1;
+    r.set(name, currentTurn - last);
+  }
+  return r;
+}
 
-  const transcript = buildTranscript(history, Math.min(42000, MAX_INPUT_CHARS));
+// Render the task brief D as a stable, pinned prompt block.
+function formatTaskBriefForPrompt(brief) {
+  if (!brief) return "";
+  const lines = ["=== COSMIC Task Brief (pinned, always in context) ==="];
+  if (brief.task_summary) {
+    lines.push(`Task: ${brief.task_summary}`);
+  }
+  if (Array.isArray(brief.constraints) && brief.constraints.length) {
+    lines.push("");
+    lines.push("Constraints (must be satisfied):");
+    for (const c of brief.constraints) {
+      lines.push(`- ${c}`);
+    }
+  }
+  if (Array.isArray(brief.subtasks) && brief.subtasks.length) {
+    lines.push("");
+    lines.push("Subtasks:");
+    for (const sub of brief.subtasks) {
+      const depPart = Array.isArray(sub.deps) && sub.deps.length ? ` (depends on: ${sub.deps.join(", ")})` : "";
+      lines.push(`- ${sub.id} [${sub.assignee}]: ${sub.description}${depPart}`);
+    }
+    lines.push("");
+    lines.push(
+      "When you contribute, reference the subtask id you are addressing (e.g., 'Addressing g2:')."
+    );
+  }
+  lines.push("=== End Task Brief ===");
+  return lines.join("\n");
+}
+
+// Leader emits the structured Task Brief D at t=0.
+async function generateTaskBrief(userPrompt, agents, leaderFocus, taskSummary) {
+  const agentSummaries = agents
+    .map((a) => `- ${a.name} (${a.role}): ${a.focus || "(no focus)"}`)
+    .join("\n");
+
   const systemPrompt = [
-    "You are a memory summarizer for a multi-agent system.",
-    "Summarize the conversation so far into a compact, lossless working memory.",
-    "Include: task goal, key constraints, key decisions, facts found, and open items.",
-    "Be concise and high-signal. Use bullet points. No fluff.",
-    "Output ONLY the summary.",
+    "You are the Leader in the COSMIC multi-agent framework.",
+    "You have just been assembled a crew of specialists. Your first job (turn t=0) is to emit a STRUCTURED TASK BRIEF D.",
+    "",
+    "The task brief will be pinned outside the rolling memory and shown to every specialist on every turn.",
+    "It MUST be a decomposition of the user's task into explicit subtasks, with one assignee per subtask.",
+    "",
+    "Return ONLY a JSON object with this exact shape (no prose, no markdown fences):",
+    "{",
+    '  "task_summary": "<one sentence restating the objective>",',
+    '  "constraints": ["<hard constraint 1>", "<hard constraint 2>", ...],',
+    '  "subtasks": [',
+    '    { "id": "g1", "description": "<narrow, verifiable subtask>", "assignee": "<specialist name from the crew>", "deps": [] },',
+    '    { "id": "g2", "description": "...", "assignee": "...", "deps": ["g1"] }',
+    "  ]",
+    "}",
+    "",
+    "Rules:",
+    "- Subtask ids are g1, g2, g3, ... in order.",
+    "- Every subtask's assignee MUST be one of the specialist names below (never 'Leader', never a name not in the crew).",
+    "- Use 3-6 subtasks; cover the full path from user request to final answer.",
+    "- Constraints capture hard user requirements (length limits, format, domain rules, forbidden actions). Extract them from the user prompt.",
+    "- deps is a list of subtask ids that must complete first; use [] for independent subtasks.",
   ].join("\n");
 
-  const userPrompt = [
-    "Conversation transcript:",
-    transcript,
+  const userMessage = [
+    `User task: ${userPrompt}`,
     "",
-    "Return the summary now.",
+    `Leader focus: ${leaderFocus || "Coordinate the specialists."}`,
+    `Task summary (draft): ${taskSummary || userPrompt.slice(0, 160)}`,
+    "",
+    "Specialists in your crew:",
+    agentSummaries,
+    "",
+    "Emit the JSON task brief now.",
+  ].join("\n");
+
+  const agentNames = new Set(agents.map((a) => a.name));
+  let brief = null;
+  try {
+    const text = await callOpenAIChatTextWithFallback(
+      [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userMessage },
+      ],
+      {
+        model: LEADER_MODEL,
+        temperature: 0.2,
+        reasoning_effort: isO1Model(LEADER_MODEL) ? "low" : undefined,
+        max_tokens: LEADER_MAX_OUTPUT_TOKENS,
+        response_format: isO1Model(LEADER_MODEL) ? undefined : { type: "json_object" },
+      }
+    );
+    brief = safeJsonParse(text);
+  } catch {
+    brief = null;
+  }
+
+  return sanitizeBrief(brief, userPrompt, agents, taskSummary);
+}
+
+function sanitizeBrief(raw, userPrompt, agents, taskSummary) {
+  const agentNames = agents.map((a) => a.name);
+  const agentSet = new Set(agentNames);
+  const safe = {
+    task_summary: "",
+    constraints: [],
+    subtasks: [],
+  };
+
+  if (raw && typeof raw === "object") {
+    safe.task_summary = String(raw.task_summary || taskSummary || userPrompt).trim().slice(0, 400);
+    if (Array.isArray(raw.constraints)) {
+      safe.constraints = raw.constraints
+        .map((c) => String(c || "").trim())
+        .filter(Boolean)
+        .slice(0, 10);
+    }
+    if (Array.isArray(raw.subtasks)) {
+      let idx = 1;
+      for (const sub of raw.subtasks.slice(0, 8)) {
+        if (!sub || typeof sub !== "object") continue;
+        const description = String(sub.description || sub.desc || sub.goal || "").trim();
+        if (!description) continue;
+        let assignee = String(sub.assignee || sub.assigned_to || "").trim();
+        if (!agentSet.has(assignee)) {
+          // fall back to the (idx-1)-th agent round-robin
+          assignee = agentNames[(idx - 1) % agentNames.length];
+        }
+        const deps = Array.isArray(sub.deps) ? sub.deps.map((d) => String(d).trim()).filter(Boolean) : [];
+        safe.subtasks.push({
+          id: sub.id ? String(sub.id).trim() : `g${idx}`,
+          description,
+          assignee,
+          deps,
+        });
+        idx += 1;
+      }
+    }
+  }
+
+  if (!safe.task_summary) {
+    safe.task_summary = (taskSummary || userPrompt).trim().slice(0, 400);
+  }
+  if (!safe.subtasks.length) {
+    // Minimal fallback: one subtask per specialist, in order.
+    safe.subtasks = agents.map((a, i) => ({
+      id: `g${i + 1}`,
+      description: a.focus || `Contribute ${a.role}'s perspective to the task.`,
+      assignee: a.name,
+      deps: i === 0 ? [] : [`g${i}`],
+    }));
+  }
+  return safe;
+}
+
+// Parse an explicit next-speaker nomination from the most recent message.
+function parseNomination(lastEntry, candidateNames) {
+  if (!lastEntry || !lastEntry.content) return null;
+  const content = String(lastEntry.content);
+  const tail = content.split(/\r?\n/).slice(-15).join("\n");
+  const candidates = candidateNames.map((n) => ({ name: n, lower: n.toLowerCase() }));
+
+  // Prefer the last explicit "Next speaker: X" line.
+  const explicitPatterns = [
+    /next\s+speaker\s*[:\-]\s*([A-Za-z0-9_]+)/i,
+    /(?:pass|hand\s*over|hand\s*off)\s+to\s+([A-Za-z0-9_]+)/i,
+    /([A-Za-z0-9_]+)\s*,?\s*please\s+(?:go|respond|take\s+over|continue)/i,
+    /\*\*([A-Za-z0-9_]+)\*\*\s*:/,
+  ];
+  for (const re of [...explicitPatterns].reverse()) {
+    const matches = [...tail.matchAll(new RegExp(re, "gi"))];
+    if (matches.length) {
+      const token = (matches[matches.length - 1][1] || "").toLowerCase();
+      const hit = candidates.find((c) => c.lower === token);
+      if (hit) return hit.name;
+    }
+  }
+
+  // Fallback: scan last few lines for a bare "Name:" at line start.
+  const lines = tail.split(/\r?\n/).reverse();
+  for (const line of lines) {
+    const m = line.match(/^\s*([A-Za-z][A-Za-z0-9_]{1,64})\s*:/);
+    if (!m) continue;
+    const token = m[1].toLowerCase();
+    const hit = candidates.find((c) => c.lower === token);
+    if (hit) return hit.name;
+  }
+  return null;
+}
+
+// SSA: selects the next speaker per Algorithm 1 in the COSMIC paper.
+// Returns { chosen, reason, candidates, recency }
+async function ssaSelectNextSpeaker(mem, allAgents, state) {
+  const lastEntry = mem.entries[mem.entries.length - 1] || null;
+  const lastSpeaker = lastEntry?.name || null;
+  const turn = state.turn;
+
+  // t = 0: Leader always opens.
+  if (turn === 0) {
+    return { chosen: LEADER_NAME, reason: "first_turn", candidates: [LEADER_NAME], recency: {} };
+  }
+
+  // Forced Leader heartbeat every T_leader turns (unless Leader just spoke).
+  if (turn > 0 && turn % COSMIC_T_LEADER === 0 && lastSpeaker !== LEADER_NAME) {
+    return {
+      chosen: LEADER_NAME,
+      reason: "heartbeat",
+      candidates: [LEADER_NAME],
+      recency: {},
+    };
+  }
+
+  // Anti-self-invocation: exclude last speaker.
+  const candidates = allAgents.map((a) => a.name).filter((n) => n !== lastSpeaker);
+
+  // Rule 1: respect a valid nomination from the last message.
+  const nominated = parseNomination(lastEntry, candidates);
+  if (nominated) {
+    return {
+      chosen: nominated,
+      reason: "nomination",
+      candidates,
+      recency: {},
+    };
+  }
+
+  // Rule 2 + 3: context-relevance via a tiny LLM call, fall back to recency fairness.
+  const recency = recencyVector(mem, candidates);
+  const recencyObj = Object.fromEntries(recency);
+
+  const recentBlocks = [];
+  for (let i = mem.entries.length - 1; i >= 0 && recentBlocks.length < 6; i -= 1) {
+    const e = mem.entries[i];
+    if (!e || !e.content) continue;
+    const content = String(e.content).replace(/\s+/g, " ").slice(0, 220);
+    recentBlocks.push(`${e.name}: ${content}`);
+  }
+  const context = recentBlocks.reverse().join("\n");
+
+  const selectorPrompt = [
+    "You are the COSMIC Speaker Selector Agent (SSA).",
+    `Choose the next speaker from: ${candidates.join(", ")}.`,
+    "Rules:",
+    `- Never choose ${lastSpeaker}.`,
+    "- Prefer an agent whose domain matches what the last message asks for.",
+    "- Prefer an agent who has been idle longer (higher recency is more idle).",
+    "",
+    `Recency (turns since last spoke): ${JSON.stringify(recencyObj)}`,
+    "",
+    "Recent conversation:",
+    context,
+    "",
+    "Return ONLY the chosen agent name, nothing else.",
   ].join("\n");
 
   try {
-    const summary = await callOpenAIChatTextWithFallback(
+    const selectorIsO1 = isO1Model(SELECTOR_MODEL);
+    const selectorMaxTokens = selectorIsO1
+      ? SELECTOR_MAX_OUTPUT_TOKENS_O1
+      : SELECTOR_MAX_OUTPUT_TOKENS_DEFAULT;
+    const response = await callOpenAIChatTextWithFallback(
       [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
+        { role: "system", content: "Return a single agent name from the candidate list. No other text." },
+        { role: "user", content: selectorPrompt },
       ],
       {
-        model: SUMMARY_MODEL,
-        temperature: 0.2,
-        max_tokens: Math.min(900, MAX_OUTPUT_TOKENS),
+        model: SELECTOR_MODEL,
+        temperature: 0,
+        max_tokens: selectorMaxTokens,
+        reasoning_effort: selectorIsO1 ? "low" : undefined,
       }
     );
-
-    memoryState.summary = String(summary || "").trim();
-    memoryState.lastSummaryTurn = turn;
-    memoryState.lastSummaryHistoryLen = history.length;
+    const normalized = String(response || "").toLowerCase();
+    const hit = candidates.find((n) => normalized.includes(n.toLowerCase()));
+    if (hit) {
+      return { chosen: hit, reason: "relevance", candidates, recency: recencyObj };
+    }
   } catch {
-    // ignore summary failures
+    // fall through to fairness
   }
+
+  // Rule 3 fallback: most idle candidate.
+  let bestName = candidates[0];
+  let bestScore = -Infinity;
+  for (const name of candidates) {
+    const score = recency.get(name) ?? Number.MAX_SAFE_INTEGER;
+    if (score > bestScore) {
+      bestScore = score;
+      bestName = name;
+    }
+  }
+  return { chosen: bestName, reason: "fairness", candidates, recency: recencyObj };
+}
+
+// Leader heartbeat: compute C(t), H(t), subtask statuses; decide termination.
+// Returns { terminate, progressMessage, scores, statuses, raw }.
+async function leaderHeartbeat(brief, mem, prevScores, userPrompt) {
+  const transcript = mem.entries
+    .map((e) => `${e.name}: ${String(e.content || "").slice(0, 800)}`)
+    .join("\n---\n");
+
+  const subtaskList = brief.subtasks
+    .map((s) => `${s.id} [${s.assignee}]: ${s.description}`)
+    .join("\n");
+
+  const systemPrompt = [
+    "You are the Leader's heartbeat evaluator in COSMIC.",
+    "Read the rolling memory and the task brief, then emit a JSON object that estimates coverage, consistency, and per-subtask status.",
+    "",
+    "Return ONLY a JSON object of this exact shape:",
+    "{",
+    '  "subtask_statuses": { "g1": "complete"|"in_progress"|"pending", ... },',
+    '  "consistency_score": <integer 0..10>,',
+    '  "inconsistencies": ["<specific contradiction or constraint violation>", ...],',
+    '  "progress_note": "<one short paragraph: what to do next and who should do it>",',
+    '  "ready_to_terminate": <true|false>',
+    "}",
+    "",
+    "Guidance:",
+    "- A subtask is 'complete' only if the rolling memory shows concrete, acceptable output for it.",
+    "- consistency_score is 10 when there are no contradictions and all user constraints are satisfied; lower when issues exist.",
+    "- inconsistencies is a short list of concrete problems (empty if none).",
+    "- progress_note must name specific specialists and specific subtasks if work remains.",
+    "- ready_to_terminate is true ONLY when ALL subtasks are complete AND consistency is >=8 AND no inconsistencies remain.",
+  ].join("\n");
+
+  const userMessage = [
+    `User task: ${userPrompt}`,
+    "",
+    "Task brief constraints:",
+    ...(brief.constraints || []).map((c) => `- ${c}`),
+    "",
+    "Subtasks:",
+    subtaskList,
+    "",
+    "Rolling shared memory (last N turns):",
+    transcript || "(empty)",
+    "",
+    "Emit the JSON now.",
+  ].join("\n");
+
+  let parsed = null;
+  try {
+    const text = await callOpenAIChatTextWithFallback(
+      [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userMessage },
+      ],
+      {
+        model: LEADER_MODEL,
+        temperature: 0.1,
+        reasoning_effort: isO1Model(LEADER_MODEL) ? "low" : undefined,
+        max_tokens: LEADER_MAX_OUTPUT_TOKENS,
+        response_format: isO1Model(LEADER_MODEL) ? undefined : { type: "json_object" },
+      }
+    );
+    parsed = safeJsonParse(text);
+  } catch {
+    parsed = null;
+  }
+
+  const statuses = {};
+  for (const sub of brief.subtasks) {
+    const raw = parsed?.subtask_statuses?.[sub.id];
+    const normalized =
+      raw === "complete" || raw === "in_progress" || raw === "pending" ? raw : "pending";
+    statuses[sub.id] = normalized;
+  }
+
+  const totalSubtasks = brief.subtasks.length || 1;
+  const completeCount = Object.values(statuses).filter((s) => s === "complete").length;
+  const coverage = completeCount / totalSubtasks;
+
+  const rawH = Number(parsed?.consistency_score);
+  const consistency = Number.isFinite(rawH) ? Math.max(0, Math.min(10, rawH)) / 10 : 0;
+
+  const inconsistencies = Array.isArray(parsed?.inconsistencies)
+    ? parsed.inconsistencies.map((x) => String(x).trim()).filter(Boolean)
+    : [];
+  const progressNote = String(parsed?.progress_note || "").trim();
+  const readyFlag = Boolean(parsed?.ready_to_terminate);
+
+  // Stability: both C(t) and H(t) must be stable across two consecutive heartbeats.
+  let stable = false;
+  if (prevScores) {
+    stable =
+      Math.abs(coverage - prevScores.coverage) <= COSMIC_EPS_C &&
+      Math.abs(consistency - prevScores.consistency) <= COSMIC_EPS_H;
+  }
+
+  const tau =
+    coverage >= 1 &&
+    consistency >= COSMIC_THETA_H &&
+    inconsistencies.length === 0 &&
+    readyFlag &&
+    stable;
+
+  return {
+    terminate: tau,
+    scores: { coverage, consistency, stable },
+    statuses,
+    inconsistencies,
+    progressNote,
+    readyFlag,
+  };
+}
+
+// Compose a human-facing progress message from the heartbeat output.
+function formatHeartbeatProgress(heartbeat, brief) {
+  const pending = brief.subtasks
+    .filter((s) => heartbeat.statuses[s.id] !== "complete")
+    .map((s) => `- ${s.id} (${s.assignee}): ${s.description} [${heartbeat.statuses[s.id]}]`);
+  const lines = [];
+  lines.push(
+    `Heartbeat check: coverage ${(heartbeat.scores.coverage * 100).toFixed(0)}%, consistency ${(
+      heartbeat.scores.consistency * 10
+    ).toFixed(1)}/10${heartbeat.scores.stable ? " (stable)" : ""}.`
+  );
+  if (heartbeat.inconsistencies.length) {
+    lines.push("Issues to resolve:");
+    for (const issue of heartbeat.inconsistencies) {
+      lines.push(`- ${issue}`);
+    }
+  }
+  if (pending.length) {
+    lines.push("Outstanding subtasks:");
+    lines.push(...pending);
+  }
+  if (heartbeat.progressNote) {
+    lines.push("");
+    lines.push(heartbeat.progressNote);
+  }
+  // Keep the conversation moving: nominate the first pending assignee.
+  const firstPending = brief.subtasks.find((s) => heartbeat.statuses[s.id] !== "complete");
+  if (firstPending) {
+    lines.push("");
+    lines.push(`Next speaker: ${firstPending.assignee}`);
+  }
+  return lines.join("\n");
 }
 
 const app = express();
@@ -1208,44 +1618,38 @@ function buildFallbackPlan(userPrompt) {
 
 async function planAgents(userPrompt) {
   const systemPrompt = [
-    "You are an orchestration planner for multi-agent tasks.",
-    "Return ONLY JSON.",
-    "Think like hiring: if you had to hire specialists to solve this task fast, who would you hire?",
-    "Create distinct specialists with minimal overlap; each agent should own one part of the problem.",
-    "Never create a 'Generalist' agent; roles must be specific and task-relevant.",
-    "Avoid generic roles like Planner, Constraint Checker, or Synthesizer unless the task explicitly needs them.",
-    "Decide 1-5 agents (not counting the Leader).",
-    "Each agent must include: name, role, focus, prompt, tools.",
-    "Include task_summary (1 short sentence).",
-    "tools can include only: web_search. Assign it only when research is needed.",
-    "If the user asks for travel itineraries, flights, hotels, restaurants, nightlife, or other real-world facts, assign web_search to the most relevant specialist(s).",
-    "Agent names should reflect the role (e.g., Logistics_Manager) and use underscores only.",
-    "Prompts must be minimal and follow the exact template.",
-    "Leader prompt template (exact lines):",
-    "You are the Leader.",
-    "You oversee agents: <AGENT_LIST>.",
-    "Your ONLY job is to delegate the task to the agents, gather proposals, resolve conflicts, and reassign subtasks.",
-	    "You must NOT solve the task yourself or write the final solution content.",
-	    "Task: <TASK_SUMMARY>.",
-	    "Focus: <LEADER_FOCUS>.",
-	    "Focus on converging to the answer as soon as possible; be concise and high-signal (avoid fluff and repetition).",
-	    "Do not set deadlines or future work. Finish within this chat.",
-	    "If required details are missing, make reasonable assumptions and proceed without asking the user.",
-	    "When you are satisfied the agents have produced enough to generate the final answer, output TERMINATE as the last line to trigger finalization.",
-	    "Always choose who speaks next at the end of your message unless you are outputting TERMINATE.",
-    "Agent prompt template (exact lines):",
-    "You are <NAME>.",
-    "Role: <ROLE>.",
-	    "Context: <FOCUS>.",
-	    "Task: <TASK_SUMMARY>.",
-	    "Tool: web_search. (only if assigned; otherwise omit this line)",
-	    "Focus on converging to the answer as soon as possible; be concise and high-signal (avoid fluff and repetition).",
-	    "Do not set deadlines or future work. Finish within this chat.",
-	    "If required details are missing, make reasonable assumptions and proceed without asking the user.",
-	    "You collaborate with <COLLABORATORS> and follow the Leader.",
-	    "Always choose who speaks next at the end of your message.",
-    "Use simple names with underscores; avoid spaces and punctuation.",
-    "Do not include meta-process roles (Planner/Synthesizer/Constraint Checker) unless the task truly requires them; prefer domain specialists.",
+    "You are the COSMIC crew planner.",
+    "Your job is to pick a small crew of domain specialists who will collaborate on the user's task under a Leader agent.",
+    "COSMIC uses a shared rolling memory and a speaker-selector; specialists converse with each other and the Leader, not a human.",
+    "",
+    "How to pick the crew (think like the COSMIC notebooks):",
+    "- Read the user's task and identify the distinct domains of expertise it actually requires.",
+    "- Pick 3 to 5 specialists. Five is usually ideal. One specialist per major domain; minimal role overlap.",
+    "- Specialists are DOMAIN experts (e.g., Cardiologist, Plot_Designer, Algebra_Solver, Logistics_Planner), not process roles.",
+    "- NEVER include meta roles: no Planner, Coordinator, Synthesizer, Orchestrator, Constraint_Checker, Critic, Reviewer, Generalist, Assistant. The Leader handles coordination.",
+    "- Each agent owns ONE clearly-scoped slice of the problem that only they can do well.",
+    "- Agent names: single-word identifiers with underscores for spaces (e.g., 'Infectious_Disease_Specialist'). No punctuation, no numbers unless the task demands it.",
+    "",
+    "Return ONLY a JSON object with this exact shape:",
+    "{",
+    '  "task_summary": "<one short sentence describing the overall task>",',
+    '  "leader_focus": "<one short sentence: what the Leader must coordinate, integrate, and decide>",',
+    '  "agents": [',
+    "    {",
+    '      "name": "<Specialist_Name>",',
+    '      "role": "<short human-readable role title>",',
+    '      "focus": "<one sentence: the narrow slice this specialist owns>",',
+    '      "tools": []',
+    "    }",
+    "  ]",
+    "}",
+    "",
+    "Tool rules:",
+    "- The only tool available is 'web_search'. Assign it (put \"web_search\" in the tools array) ONLY to specialists whose focus genuinely requires current, real-world information (travel facts, current events, market prices, live specs, news).",
+    "- For reasoning-only, creative, planning, or math tasks, leave tools as [].",
+    "- Assign web_search to at most 2 specialists.",
+    "",
+    "Return ONLY the JSON. No prose, no markdown fences.",
   ].join("\n");
 
   const placeholderNames = new Set(AGENT_NAME_POOL.map((name) => name.toLowerCase()));
@@ -1369,211 +1773,87 @@ async function planAgents(userPrompt) {
   return buildFallbackPlan(userPrompt);
 }
 
-function buildLeaderPrompt(agentNames, basePrompt, leaderFocus, taskSummary) {
+function buildLeaderPrompt(agentNames, leaderFocus, taskSummary) {
   const focusLine = leaderFocus
     ? `Focus: ${leaderFocus}.`
-    : "Focus: Coordinate and finalize the outcome.";
+    : "Focus: Coordinate specialists and integrate their work into a final answer.";
   const taskLine = taskSummary
     ? `Task: ${taskSummary}.`
-    : "Task: Solve the user's request.";
+    : "Task: Solve the user's request through coordinated collaboration.";
 
-  const templateLines = [
-    "You are the Leader.",
-    `You oversee agents: ${agentNames.join(", ")}.`,
-    "Your ONLY job is to delegate the task to the agents, gather proposals, resolve conflicts, and reassign subtasks.",
-    "You must NOT solve the task yourself or write the final solution content.",
+  return [
+    "You are the Leader in the COSMIC multi-agent framework.",
+    `You coordinate these specialists: ${agentNames.join(", ")}.`,
     taskLine,
     focusLine,
-    "Do not prefix your message with your name or speaker tags (e.g., 'Leader:' or 'Leader').",
-    "Prefer one-pass delegation: ask agents for complete proposals in their next message and avoid follow-ups unless a critical gap remains.",
-    "Focus on converging to the answer as soon as possible; be concise and high-signal (avoid fluff and repetition).",
-    "Do not set deadlines or future work. Finish within this chat.",
-    "If required details are missing, make reasonable assumptions and proceed without asking the user.",
-    "When you are satisfied the agents have produced enough to generate the final answer, output TERMINATE as the last line to trigger finalization.",
-    "Always choose who speaks next at the end of your message unless you are outputting TERMINATE.",
-  ];
-
-  const base = basePrompt ? ensurePromptLines(basePrompt, templateLines) : "";
-  return base || templateLines.join("\n");
+    "",
+    "Your responsibilities:",
+    "- At the start, decompose the task into explicit subtasks and assign each to the right specialist.",
+    "- Monitor the rolling shared memory; identify conflicts, gaps, and unaddressed constraints.",
+    "- Give specialists concrete, directive instructions (\"Cardiologist: rule out X given the new lab\").",
+    "- Do NOT write the final solution content yourself - that is the specialists' job.",
+    "- Be concise and high-signal. No fluff, no future-work deferrals, no asking the user follow-up questions.",
+    "- When assumptions are needed, make reasonable ones and proceed.",
+    "",
+    "Turn-taking:",
+    "- Always end your message by explicitly nominating the next speaker on a clear line (e.g., \"Next speaker: Cardiologist\").",
+    "- Never prefix your message with your own name or speaker label.",
+    "",
+    "Termination:",
+    "- Only output 'TERMINATE' on the final line when you are confident that every subtask is complete, the solution is consistent with all user constraints, and stability has been reached across heartbeats.",
+    "- Before TERMINATE, produce a concise Leader summary that aggregates the specialists' contributions into the final answer.",
+  ].join("\n");
 }
 
 function buildAgentPrompt(spec, collaboratorNames, taskSummary) {
-  const context = spec.focus
-    ? `Context: ${spec.focus}.`
-    : "Context: Provide support as needed.";
-  const taskLine = taskSummary
-    ? `Task: ${taskSummary}.`
-    : "Task: Solve the user's request.";
   const roleLabel = String(spec.role || "").trim() || humanizeAgentLabel(spec.name) || "Specialist";
+  const focus = String(spec.focus || "").trim();
 
-  const templateLines = [
-    `You are ${spec.name}.`,
-    `Role: ${roleLabel}.`,
-    context,
-    taskLine,
+  const lines = [
+    `You are ${spec.name} - ${roleLabel}.`,
+    `Task: ${taskSummary || "Collaborate with the crew to solve the user's request."}`,
+    focus ? `Your focus: ${focus}.` : "Own your domain's contribution to the task.",
+    "",
+    "How to participate:",
+    "- Stay strictly within your specialty. Do not try to do other specialists' work.",
+    "- Be concise and high-signal. Short paragraphs or tight bullets; no filler.",
+    "- Adapt your reasoning when new information or specialist input arrives.",
+    "- Cite the subtask id (e.g., 'Addressing g2:') when the Leader's task brief uses subtask ids.",
+    "- Make reasonable assumptions if details are missing; do not ask the user.",
+    "",
+    `Collaborators: ${collaboratorNames.join(", ")}. You follow the Leader's direction.`,
+    "",
+    "Turn-taking:",
+    "- End every message by nominating the next speaker on a clear line (e.g., \"Next speaker: Leader\").",
+    "- Do not prefix your message with your own name.",
   ];
 
-	if (spec.tools && spec.tools.includes("web_search")) {
-	  templateLines.push("Tool: web_search.");
-	}
+  if (spec.tools && spec.tools.includes("web_search")) {
+    lines.push(
+      "",
+      "Tool available: web_search(query). Use it only when your contribution genuinely needs current real-world facts you do not already know."
+    );
+  }
 
-	templateLines.push(
-	  "Focus on converging to the answer as soon as possible; be concise and high-signal (avoid fluff and repetition)."
-	);
-	templateLines.push("Do not set deadlines or future work. Finish within this chat.");
-  templateLines.push(
-    "If required details are missing, make reasonable assumptions and proceed without asking the user."
-  );
-  templateLines.push(
-    `You collaborate with ${collaboratorNames.join(", ")} and follow the Leader.`
-  );
-  templateLines.push(
-    "Do not prefix your message with your name or speaker tags (e.g., 'Agent_X:' on its own line)."
-  );
-  templateLines.push("Always choose who speaks next at the end of your message.");
-
-  const base = spec.prompt ? ensurePromptLines(spec.prompt, templateLines) : "";
-  return base || templateLines.join("\n");
+  return lines.join("\n");
 }
 
-async function selectNextSpeaker(history, agents, callCount) {
-  if (callCount === 0) {
-    return LEADER_NAME;
-  }
-
-  const lastSpeaker = history.at(-1)?.name || "";
-  const candidateNames = agents.map((agent) => agent.name);
-  const eligibleCandidates = candidateNames.filter((name) => name !== lastSpeaker);
-  const candidates = eligibleCandidates.length ? eligibleCandidates : candidateNames;
-
-  if (callCount % LEADER_CHECKIN_INTERVAL === 0 && lastSpeaker !== LEADER_NAME) {
-    return LEADER_NAME;
-  }
-
-  const lastMessage = String(history.at(-1)?.content || "");
-  const lastLines = lastMessage.split(/\r?\n/).slice(-30);
-  const hintLine = [...lastLines].reverse().find((line) =>
-    /(who speaks next|next speaker|choose who speaks next)/i.test(line)
-  );
-
-  if (hintLine) {
-    const hintLower = hintLine.toLowerCase();
-    const hinted = candidates.find((name) =>
-      hintLower.includes(name.toLowerCase())
-    );
-    if (hinted && hinted !== lastSpeaker) {
-      return hinted;
-    }
-  }
-
-  // Fast-path: if the last message explicitly assigns a subtask like "Agent_X: ...",
-  // pick that agent without spending an extra model call.
-  const candidateLookup = new Map(
-    candidates.map((name) => [name.toLowerCase(), name])
-  );
-  for (const line of lastLines) {
-    const trimmed = String(line || "").trim();
-    if (!trimmed) continue;
-
-    const bold = trimmed.match(/\*\*([A-Za-z][A-Za-z0-9_]{1,64})\*\*\s*:/);
-    const plain = trimmed.match(/^([A-Za-z][A-Za-z0-9_]{1,64})\s*:/);
-    const token = (bold?.[1] || plain?.[1] || "").toLowerCase();
-    if (!token) continue;
-    const assigned = candidateLookup.get(token);
-    if (assigned && assigned !== lastSpeaker) {
-      return assigned;
-    }
-  }
-
-  const recentBlocks = [];
-  for (
-    let index = history.length - 1;
-    index >= 0 && recentBlocks.length < 8;
-    index -= 1
-  ) {
-    const message = history[index];
-    if (!message || message.role === "tool") continue;
-    const name = message.name || (message.role === "user" ? "User" : "Assistant");
-    const content = String(message.content || "").trim().replace(/\s+/g, " ");
-    if (!content) continue;
-    recentBlocks.push(`${name}: ${content.slice(0, 260)}`);
-  }
-  const context = recentBlocks.reverse().join("\n");
-
-  const selectorPrompt = [
-    "You are the Speaker Selector Agent (SSA).",
-    `Choose the next speaker from: ${candidates.join(", ")}.`,
-    "Rules:",
-    "- Return ONLY a single agent name from the list.",
-    `- Do NOT choose ${lastSpeaker} again immediately.`,
-    "- If the last message assigns a subtask to a named agent (e.g., 'Agent_X: ...'), choose that agent.",
-    "- Otherwise, choose the agent best positioned to make progress next and keep participation balanced.",
-    "",
-    "Recent conversation:",
-    context,
-  ].join("\n");
-
-  try {
-    const selectorIsO1 = isO1Model(SELECTOR_MODEL);
-    const selectorMaxTokens = selectorIsO1
-      ? SELECTOR_MAX_OUTPUT_TOKENS_O1
-      : SELECTOR_MAX_OUTPUT_TOKENS_DEFAULT;
-    const response = await callOpenAIChatTextWithFallback(
-      [
-        {
-          role: "system",
-          content: "Return a single agent name from the candidate list.",
-        },
-        { role: "user", content: selectorPrompt },
-      ],
-      {
-        temperature: 0,
-        model: SELECTOR_MODEL,
-        max_tokens: selectorMaxTokens,
-        reasoning_effort: selectorIsO1 ? "low" : undefined,
-      }
-    );
-
-    const normalized = response.toLowerCase();
-    const match = candidates.find((name) =>
-      normalized.includes(name.toLowerCase())
-    );
-
-    return match || candidates[0];
-  } catch (error) {
-    return candidates[0];
-  }
-}
-
-async function generateAgentReply(agent, history, memoryState, streamContext = null) {
-  const memory = memoryState?.map?.get(agent.name) || [];
-  const hasSummary = Boolean(String(memoryState?.summary || "").trim());
-  const memoryWindow = hasSummary ? Math.min(MEMORY_WINDOW, 18) : MEMORY_WINDOW;
-  const recentMemory = memory.slice(-memoryWindow);
+async function generateAgentReply(agent, mem, brief, streamContext = null) {
   const messages = [{ role: "system", content: agent.systemPrompt }];
   const model = agent.model || OPENAI_MODEL;
   const isO1 = isO1Model(model);
   const maxOutputTokens =
     agent.name === LEADER_NAME ? LEADER_MAX_OUTPUT_TOKENS : AGENT_MAX_OUTPUT_TOKENS;
-  const userPrompt = String(history?.[0]?.content || "");
+  const firstUserEntry = mem.full.find((e) => e.role === "user");
+  const userPrompt = String(firstUserEntry?.content || "");
   const normalizeText = (value) => {
     if (typeof value === "string") return value;
     if (value === null || value === undefined) return "";
     return String(value);
   };
 
-  if (hasSummary) {
-    messages.push({
-      role: "system",
-      content: `Shared memory summary:\n${String(memoryState.summary || "").trim()}`,
-    });
-  }
-
-  if (recentMemory.length) {
-    messages.push(...recentMemory);
-  } else if (history.length) {
-    messages.push(history[history.length - 1]);
-  }
+  // Pinned Task Brief D + rolling FIFO memory M_t.
+  messages.push(...memoryToChatMessages(mem, brief));
 
   const tools =
     agent.tools && agent.tools.includes("web_search") ? [WEB_SEARCH_TOOL] : null;
@@ -1780,7 +2060,16 @@ async function generateAgentReply(agent, history, memoryState, streamContext = n
 }
 
 async function generateFinalAnswer(prompt, history, streamContext = null) {
-  const transcript = buildTranscript(history, MAX_INPUT_CHARS);
+  const normalizedHistory = Array.isArray(history)
+    ? history
+    : history && Array.isArray(history.full)
+    ? history.full.map((e) => ({
+        role: e.role === "user" ? "user" : "assistant",
+        name: e.name,
+        content: e.content,
+      }))
+    : [];
+  const transcript = buildTranscript(normalizedHistory, MAX_INPUT_CHARS);
   const systemPrompt = [
     "You are the Final Answer Validator.",
     "You read the full conversation transcript and produce the final answer for the user.",
@@ -1873,16 +2162,10 @@ async function runConversationCore(finalPrompt, ws, runId) {
     focus: leaderFocus,
     model: LEADER_MODEL,
     toolUseCount: 0,
-    systemPrompt: buildLeaderPrompt(
-      agentNames,
-      plan.leader_prompt,
-      leaderFocus,
-      taskSummary
-    ),
+    systemPrompt: buildLeaderPrompt(agentNames, leaderFocus, taskSummary),
   };
 
   const allAgents = [leader, ...agents];
-  const memoryState = initAgentMemory(allAgents);
 
   send(ws, {
     type: "agents",
@@ -1895,68 +2178,140 @@ async function runConversationCore(finalPrompt, ws, runId) {
     })),
   });
 
-  const history = [{ role: "user", name: "User", content: finalPrompt }];
-  syncAgentMemory(history, memoryState);
-  let callCount = 0;
+  // Shared rolling memory M_t (FIFO, last COSMIC_N entries) + full transcript.
+  const mem = createSharedMemory(COSMIC_N);
+  appendMemory(mem, { role: "user", name: "User", content: finalPrompt, turn: 0 });
+
+  // Leader emits Task Brief D at t=0. Pinned outside the FIFO.
+  send(ws, { type: "status", message: "Leader is drafting task brief...", runId });
+  const brief = await generateTaskBrief(finalPrompt, agents, leaderFocus, taskSummary);
+  send(ws, { type: "task_brief", runId, brief });
 
   send(ws, { type: "status", message: "Conversation started.", runId });
 
+  const runFinalization = async (reason) => {
+    send(ws, { type: "status", message: `${reason} Finalizing output...`, runId });
+    const finalMessageId = `${runId}:final`;
+    send(ws, { type: "message_start", runId, id: finalMessageId, name: LEADER_NAME });
+    const finalAnswer = await generateFinalAnswer(finalPrompt, mem, {
+      ws,
+      runId,
+      messageId: finalMessageId,
+    });
+    appendMemory(mem, {
+      role: "assistant",
+      name: LEADER_NAME,
+      content: finalAnswer,
+      turn: mem.full.length,
+    });
+    send(ws, {
+      type: "message",
+      runId,
+      id: finalMessageId,
+      name: LEADER_NAME,
+      content: finalAnswer,
+    });
+    send(ws, { type: "final", runId, content: finalAnswer });
+    send(ws, { type: "status", message: "Conversation finished.", runId });
+  };
+
+  let prevHeartbeatScores = null;
+
   for (let turn = 0; turn < MAX_TURNS; turn += 1) {
-    const nextSpeakerName = await selectNextSpeaker(history, allAgents, callCount);
-    const nextSpeaker = allAgents.find((agent) => agent.name === nextSpeakerName);
+    const ssa = await ssaSelectNextSpeaker(mem, allAgents, { turn });
+    const nextSpeaker = allAgents.find((a) => a.name === ssa.chosen);
 
     if (!nextSpeaker) {
       send(ws, { type: "error", message: "No valid speaker found.", runId });
       break;
     }
 
+    send(ws, {
+      type: "ssa_decision",
+      runId,
+      turn,
+      chosen: ssa.chosen,
+      reason: ssa.reason,
+      candidates: ssa.candidates,
+      recency: ssa.recency,
+    });
     send(ws, { type: "speaker", name: nextSpeaker.name, runId });
     send(ws, {
       type: "status",
-      message: `Turn ${turn + 1}: ${nextSpeaker.name} responding...`,
+      message: `Turn ${turn + 1}: ${nextSpeaker.name} responding (${ssa.reason})...`,
       runId,
     });
 
+    // Leader heartbeat path: instead of a free-form reply, compute C(t), H(t), and check tau.
+    if (ssa.reason === "heartbeat" && nextSpeaker.name === LEADER_NAME) {
+      const heartbeat = await leaderHeartbeat(brief, mem, prevHeartbeatScores, finalPrompt);
+      send(ws, {
+        type: "heartbeat",
+        runId,
+        turn,
+        scores: heartbeat.scores,
+        statuses: heartbeat.statuses,
+        inconsistencies: heartbeat.inconsistencies,
+        readyFlag: heartbeat.readyFlag,
+      });
+      send(ws, {
+        type: "subtask_update",
+        runId,
+        statuses: heartbeat.statuses,
+      });
+
+      const progressText = formatHeartbeatProgress(heartbeat, brief);
+      const messageId = `${runId}:${turn}:${LEADER_NAME}`;
+      send(ws, { type: "message_start", runId, id: messageId, name: LEADER_NAME });
+      send(ws, {
+        type: "message",
+        runId,
+        id: messageId,
+        name: LEADER_NAME,
+        content: progressText,
+      });
+      appendMemory(mem, {
+        role: "assistant",
+        name: LEADER_NAME,
+        content: progressText,
+        turn: mem.full.length,
+      });
+
+      if (heartbeat.terminate) {
+        await runFinalization("Termination predicate satisfied.");
+        return;
+      }
+
+      prevHeartbeatScores = {
+        coverage: heartbeat.scores.coverage,
+        consistency: heartbeat.scores.consistency,
+      };
+      continue;
+    }
+
     const messageId = `${runId}:${turn}:${nextSpeaker.name}`;
     send(ws, { type: "message_start", runId, id: messageId, name: nextSpeaker.name });
-    const reply = await generateAgentReply(nextSpeaker, history, memoryState, {
+    const reply = await generateAgentReply(nextSpeaker, mem, brief, {
       ws,
       runId,
       messageId,
     });
 
-    if (nextSpeaker.name === LEADER_NAME && String(reply || "").trimEnd().endsWith("TERMINATE")) {
-      history.push({ role: "assistant", name: nextSpeaker.name, content: reply });
-      syncAgentMemory(history, memoryState);
+    appendMemory(mem, {
+      role: "assistant",
+      name: nextSpeaker.name,
+      content: reply,
+      turn: mem.full.length,
+    });
+    send(ws, { type: "message", runId, id: messageId, name: nextSpeaker.name, content: reply });
 
-      send(ws, {
-        type: "status",
-        message: "Leader requested termination. Finalizing output...",
-        runId,
-      });
-      const finalMessageId = `${runId}:final`;
-      send(ws, { type: "message_start", runId, id: finalMessageId, name: LEADER_NAME });
-      const finalAnswer = await generateFinalAnswer(finalPrompt, history, {
-        ws,
-        runId,
-        messageId: finalMessageId,
-      });
-
-      history.push({ role: "assistant", name: LEADER_NAME, content: finalAnswer });
-      syncAgentMemory(history, memoryState);
-
-      send(ws, { type: "message", runId, id: finalMessageId, name: LEADER_NAME, content: finalAnswer });
-      send(ws, { type: "final", runId, content: finalAnswer });
-      send(ws, { type: "status", message: "Conversation finished.", runId });
+    if (
+      nextSpeaker.name === LEADER_NAME &&
+      String(reply || "").trimEnd().endsWith("TERMINATE")
+    ) {
+      await runFinalization("Leader requested termination.");
       return;
     }
-
-    history.push({ role: "assistant", name: nextSpeaker.name, content: reply });
-    syncAgentMemory(history, memoryState);
-    send(ws, { type: "message", runId, id: messageId, name: nextSpeaker.name, content: reply });
-    await maybeUpdateMemorySummary(history, memoryState, turn, ws, runId);
-
-    callCount += 1;
   }
 
   send(ws, {
@@ -1964,22 +2319,7 @@ async function runConversationCore(finalPrompt, ws, runId) {
     message: "Max turns reached. Finalizing best-effort output...",
     runId,
   });
-  const finalMessageId = `${runId}:final`;
-  send(ws, { type: "message_start", runId, id: finalMessageId, name: LEADER_NAME });
-  const finalAnswer = await generateFinalAnswer(finalPrompt, history, {
-    ws,
-    runId,
-    messageId: finalMessageId,
-  });
-  history.push({ role: "assistant", name: LEADER_NAME, content: finalAnswer });
-  syncAgentMemory(history, memoryState);
-  send(ws, { type: "message", runId, id: finalMessageId, name: LEADER_NAME, content: finalAnswer });
-  send(ws, { type: "final", runId, content: finalAnswer });
-  send(ws, {
-    type: "status",
-    message: "Conversation ended by max turn limit.",
-    runId,
-  });
+  await runFinalization("Max turn limit reached.");
 }
 
 async function startConversation(rawPrompt, ws, session) {
