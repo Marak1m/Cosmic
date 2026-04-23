@@ -7,14 +7,32 @@
 
    Global export: window.createSolarSystem(containerEl, opts)
    Returns an instance with:
-     - setActivePlanet(name)     ← glow the agent that's speaking
-     - drawTransfer(from, to)    ← comet trail from prev → next
-     - destroy()                 ← tear down DOM + listeners
-     - setStatus(text)            ← write to graph-status element, if any
+     - layout(leader, agents)     ← (re)build orbits
+     - setActivePlanet(name)      ← glow the agent that's speaking
+     - setSpeaker(name)           ← halo transfer + glow
+     - drawTransfer(from, to)     ← one-shot comet trail
+     - destroy()                  ← tear down DOM + listeners
+     - setStatus(text)            ← write to graph-status element
 
-   The factory is intentionally DOM-only and stateless beyond
-   the instance it returns, so both pages can instantiate it
-   without colliding.
+   Design notes (recent fixes):
+
+   * Planets never overlap. All orbits share the same animation
+     duration — this means every planet advances at the same
+     angular rate. Combined with evenly-spaced initial phases
+     (`i * 360 / n`), the angular separation between any two
+     planets is constant forever; their labels can never drift
+     into the same radial line. This replaces the earlier
+     mixed-period + golden-angle scheme that looked pretty
+     for the first few seconds and then smashed labels.
+
+   * Comet follows the speaker. Instead of a fire-and-forget
+     arc on every turn change, the instance keeps a persistent
+     `.graph-halo` SVG group (glow ring + orbiting satellite)
+     re-anchored to the current speaker's planet every RAF.
+     When the speaker changes, we play a short transfer comet
+     from the previous planet to the new one, then re-attach
+     the halo. The halo is what the user reads as "this agent
+     is currently responding."
    ========================================================= */
 
 (function () {
@@ -29,6 +47,13 @@
     { h1: "#7c3aed", h2: "#f472b6" },
   ];
 
+  // Every orbit rotates at the same angular rate — this is the knob
+  // that guarantees "no two planets ever line up." Tune for how
+  // "lively" the scene feels without making motion dizzying.
+  const ORBIT_PERIOD_S = 46;
+
+  const SVGNS = "http://www.w3.org/2000/svg";
+
   function createSolarSystem(container, options) {
     if (!container) {
       throw new Error("createSolarSystem: container element is required");
@@ -38,14 +63,20 @@
     const statusEl = opts.statusEl || null;
 
     // Instance-scoped state (so two instances don't share DOM refs)
-    const graphNodes = new Map(); // agentName → element holding the planet body (or sun-core for Leader)
+    const graphNodes = new Map(); // agentName → planet element (or sun-core for Leader)
     let graphLeaderName = null;
     let sunCoreEl = null;
     let graphSvg = null;
     let prevSpeaker = null;
 
-    // Make sure the container has the solar-system class (pages may
-    // give it a different initial id and forget the class).
+    // Halo state — persistent SVG elements that track the current
+    // speaker's planet. Created lazily inside ensureHalo().
+    let haloGroup = null;
+    let haloRing = null;
+    let haloSatellite = null;
+    let haloTargetName = null;
+    let haloRaf = 0;
+
     if (!container.classList.contains("solar-system")) {
       container.classList.add("solar-system");
     }
@@ -53,7 +84,7 @@
     // Ensure the SVG comet-trail layer exists.
     graphSvg = container.querySelector(".graph-lines");
     if (!graphSvg) {
-      graphSvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      graphSvg = document.createElementNS(SVGNS, "svg");
       graphSvg.classList.add("graph-lines");
       graphSvg.setAttribute("aria-hidden", "true");
       container.appendChild(graphSvg);
@@ -83,9 +114,13 @@
     }
 
     function layout(leader, agents) {
+      // Reset halo on every layout so we don't hold a stale ref.
+      unpinHalo();
+
       clearOrbitChildren();
       graphNodes.clear();
       graphLeaderName = leader ? leader.name : null;
+      prevSpeaker = null;
 
       if (leader && sunCoreEl) {
         sunCoreEl.removeAttribute("data-hidden");
@@ -95,34 +130,55 @@
       }
 
       const list = Array.isArray(agents) ? agents : [];
+      const n = list.length;
+      if (!n) {
+        if (statusEl) {
+          statusEl.textContent = leader ? "1 body in orbit" : "Waiting for crew...";
+        }
+        return;
+      }
+
       const stageRect = container.getBoundingClientRect();
       const usable = Math.min(stageRect.width || 440, stageRect.height || 440);
-      // Outer orbit must stay at least 60px from the container edge so
-      // planet labels don't clip against the panel border.
-      const maxRadius = Math.max(120, usable / 2 - 60);
-      const baseRadius = Math.max(96, usable * 0.22);
-      const rawStep = (usable * 0.4 - baseRadius) / Math.max(list.length - 1, 1);
-      const step = Math.max(28, rawStep);
+
+      // Outer orbit has to stay ~70px from the container edge so
+      // planet labels don't clip the panel border.
+      const maxRadius = Math.max(130, usable / 2 - 70);
+
+      // Inner orbit sits far enough from the sun to avoid label
+      // crunch against the sun's halo.
+      const baseRadius = Math.max(110, usable * 0.24);
+
+      // Radial step: the gap between one orbit and the next. A planet
+      // body is ~56px and a label stack is ~48px tall, so we need at
+      // least ~60px between rings or the inner planet's label crashes
+      // into the next orbit's body.
+      const rawStep = n > 1 ? (maxRadius - baseRadius) / (n - 1) : 0;
+      const step = n > 1 ? Math.max(60, rawStep) : 0;
 
       list.forEach((agent, i) => {
         const candidate = baseRadius + i * step;
         const radius = Math.min(candidate, maxRadius);
         const diameter = radius * 2;
-        const duration = 20 + (i * 4.5) % 28; // 20..48s
-        const initialOffset = (i * 137.5) % 360; // golden-angle spread
+
+        // Evenly-spaced angles across the full circle. Because every
+        // orbit shares ORBIT_PERIOD_S, this separation stays constant.
+        const angleDeg = (i * 360) / n;
+        const delay = -((ORBIT_PERIOD_S * angleDeg) / 360);
+
         const palette = PLANET_PALETTE[i % PLANET_PALETTE.length];
 
         const orbit = document.createElement("div");
         orbit.className = "orbit";
         orbit.style.width = diameter + "px";
         orbit.style.height = diameter + "px";
-        orbit.style.animationDuration = duration + "s";
-        orbit.style.animationDelay = `-${(duration * initialOffset) / 360}s`;
+        orbit.style.animationDuration = ORBIT_PERIOD_S + "s";
+        orbit.style.animationDelay = delay + "s";
 
         const anchor = document.createElement("div");
         anchor.className = "planet-anchor";
-        anchor.style.animationDuration = duration + "s";
-        anchor.style.animationDelay = `-${(duration * initialOffset) / 360}s`;
+        anchor.style.animationDuration = ORBIT_PERIOD_S + "s";
+        anchor.style.animationDelay = delay + "s";
 
         const planet = document.createElement("div");
         planet.className = "planet";
@@ -147,7 +203,7 @@
       });
 
       if (statusEl) {
-        const total = (leader ? 1 : 0) + list.length;
+        const total = (leader ? 1 : 0) + n;
         statusEl.textContent = `${total} bodies in orbit`;
       }
     }
@@ -173,14 +229,18 @@
       };
     }
 
+    // ---------- Transfer comet (one-shot, on speaker change) ----------
+
     function drawTransfer(fromName, toName) {
-      if (!graphSvg || !fromName || !toName || fromName === toName) return;
+      if (!graphSvg || !fromName || !toName || fromName === toName) {
+        return Promise.resolve();
+      }
       const fromEl = graphNodes.get(fromName);
       const toEl = graphNodes.get(toName);
-      if (!fromEl || !toEl) return;
+      if (!fromEl || !toEl) return Promise.resolve();
 
       const stageRect = container.getBoundingClientRect();
-      if (!stageRect.width) return;
+      if (!stageRect.width) return Promise.resolve();
 
       graphSvg.setAttribute(
         "viewBox",
@@ -189,96 +249,193 @@
 
       const isLeader = fromName === graphLeaderName;
 
-      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      const path = document.createElementNS(SVGNS, "path");
       path.setAttribute("data-leader", String(isLeader));
       path.classList.add("graph-arrow");
       graphSvg.appendChild(path);
 
-      const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-      dot.setAttribute("r", "4.5");
+      const dot = document.createElementNS(SVGNS, "circle");
+      dot.setAttribute("r", "5");
       dot.setAttribute("data-leader", String(isLeader));
       dot.classList.add("graph-dot");
       graphSvg.appendChild(dot);
 
-      let t0 = null;
-      const dur = 780;
+      return new Promise((resolve) => {
+        let t0 = null;
+        const dur = 620;
 
-      function easeInOut(p) {
-        return p < 0.5 ? 2 * p * p : -1 + (4 - 2 * p) * p;
-      }
-
-      function buildPath() {
-        // Recompute endpoints on every frame so the comet tracks the
-        // currently-orbiting planets even while they rotate.
-        const from = getOrbitPoint(fromEl, stageRect);
-        const to = getOrbitPoint(toEl, stageRect);
-        const mx = (from.x + to.x) / 2;
-        const my = (from.y + to.y) / 2;
-        const dx = to.x - from.x;
-        const dy = to.y - from.y;
-        const cpx = mx - dy * 0.28;
-        const cpy = my + dx * 0.28;
-        path.setAttribute(
-          "d",
-          `M ${from.x} ${from.y} Q ${cpx} ${cpy} ${to.x} ${to.y}`
-        );
-      }
-
-      function tick(ts) {
-        if (!t0) t0 = ts;
-        const raw = Math.min((ts - t0) / dur, 1);
-        const p = easeInOut(raw);
-
-        buildPath();
-        const len = path.getTotalLength();
-        if (!len) {
-          path.remove();
-          dot.remove();
-          return;
+        function easeInOut(p) {
+          return p < 0.5 ? 2 * p * p : -1 + (4 - 2 * p) * p;
         }
-        path.style.strokeDasharray = len;
-        path.style.strokeDashoffset = len * (1 - p);
 
-        const pt = path.getPointAtLength(len * p);
-        dot.setAttribute("cx", pt.x);
-        dot.setAttribute("cy", pt.y);
+        function buildPath() {
+          const from = getOrbitPoint(fromEl, stageRect);
+          const to = getOrbitPoint(toEl, stageRect);
+          const mx = (from.x + to.x) / 2;
+          const my = (from.y + to.y) / 2;
+          const dx = to.x - from.x;
+          const dy = to.y - from.y;
+          const cpx = mx - dy * 0.28;
+          const cpy = my + dx * 0.28;
+          path.setAttribute(
+            "d",
+            `M ${from.x} ${from.y} Q ${cpx} ${cpy} ${to.x} ${to.y}`
+          );
+        }
 
-        if (raw < 1) {
-          requestAnimationFrame(tick);
-        } else {
-          const receiving =
-            toEl.classList && toEl.classList.contains("planet") ? toEl : null;
-          if (receiving) {
-            receiving.classList.add("receiving");
-            setTimeout(() => receiving.classList.remove("receiving"), 600);
+        function tick(ts) {
+          if (!t0) t0 = ts;
+          const raw = Math.min((ts - t0) / dur, 1);
+          const p = easeInOut(raw);
+
+          buildPath();
+          const len = path.getTotalLength();
+          if (!len) {
+            path.remove();
+            dot.remove();
+            resolve();
+            return;
           }
-          setTimeout(() => {
-            path.style.transition = "opacity 0.45s ease";
-            dot.style.transition = "opacity 0.45s ease";
-            path.style.opacity = "0";
-            dot.style.opacity = "0";
-            setTimeout(() => {
-              path.remove();
-              dot.remove();
-            }, 450);
-          }, 700);
-        }
-      }
+          path.style.strokeDasharray = len;
+          path.style.strokeDashoffset = len * (1 - p);
 
-      requestAnimationFrame(tick);
+          const pt = path.getPointAtLength(len * p);
+          dot.setAttribute("cx", pt.x);
+          dot.setAttribute("cy", pt.y);
+
+          if (raw < 1) {
+            requestAnimationFrame(tick);
+          } else {
+            const receiving =
+              toEl.classList && toEl.classList.contains("planet") ? toEl : null;
+            if (receiving) {
+              receiving.classList.add("receiving");
+              setTimeout(() => receiving.classList.remove("receiving"), 600);
+            }
+            setTimeout(() => {
+              path.style.transition = "opacity 0.45s ease";
+              dot.style.transition = "opacity 0.45s ease";
+              path.style.opacity = "0";
+              dot.style.opacity = "0";
+              setTimeout(() => {
+                path.remove();
+                dot.remove();
+                resolve();
+              }, 450);
+            }, 160);
+          }
+        }
+
+        requestAnimationFrame(tick);
+      });
     }
 
-    // Speaker update: handles prev → next comet + glow swap.
-    // In ambient mode we still want the glow and trail but no
-    // external driver calls it — the instance exposes the same
-    // API so the caller can decide.
+    // ---------- Halo (persistent, tracks the current speaker) ----------
+
+    function ensureHalo() {
+      if (haloGroup) return;
+      haloGroup = document.createElementNS(SVGNS, "g");
+      haloGroup.classList.add("graph-halo");
+      haloGroup.setAttribute("data-hidden", "1");
+
+      haloRing = document.createElementNS(SVGNS, "circle");
+      haloRing.classList.add("graph-halo-ring");
+      haloRing.setAttribute("r", "38");
+      haloGroup.appendChild(haloRing);
+
+      // Satellite dot orbits the halo center via a pure SVG rotation,
+      // driven by CSS — no JS per-frame cost beyond the anchor update.
+      const satelliteWrap = document.createElementNS(SVGNS, "g");
+      satelliteWrap.classList.add("graph-halo-satellite");
+      haloSatellite = document.createElementNS(SVGNS, "circle");
+      haloSatellite.classList.add("graph-halo-satellite-dot");
+      haloSatellite.setAttribute("r", "3.5");
+      haloSatellite.setAttribute("cx", "38"); // orbit radius around halo center
+      haloSatellite.setAttribute("cy", "0");
+      satelliteWrap.appendChild(haloSatellite);
+      haloGroup.appendChild(satelliteWrap);
+      haloGroup.__satelliteWrap = satelliteWrap;
+
+      graphSvg.appendChild(haloGroup);
+    }
+
+    function haloLoop() {
+      if (!haloTargetName) {
+        haloRaf = 0;
+        return;
+      }
+      const targetEl = graphNodes.get(haloTargetName);
+      if (!targetEl || !graphSvg) {
+        haloRaf = requestAnimationFrame(haloLoop);
+        return;
+      }
+      const stageRect = container.getBoundingClientRect();
+      if (stageRect.width) {
+        graphSvg.setAttribute(
+          "viewBox",
+          "0 0 " + stageRect.width + " " + stageRect.height
+        );
+        const pt = getOrbitPoint(targetEl, stageRect);
+        // Position the whole halo group via transform. The satellite
+        // wrap inside rotates on its own via CSS animation.
+        haloGroup.setAttribute("transform", `translate(${pt.x} ${pt.y})`);
+        if (haloGroup.__satelliteWrap) {
+          // Keep the satellite wrap centered on the halo; CSS handles rotation.
+          haloGroup.__satelliteWrap.setAttribute("transform", "");
+        }
+      }
+      haloRaf = requestAnimationFrame(haloLoop);
+    }
+
+    function pinHaloTo(name) {
+      if (!name || !graphNodes.has(name)) {
+        unpinHalo();
+        return;
+      }
+      ensureHalo();
+      haloTargetName = name;
+      haloGroup.removeAttribute("data-hidden");
+      haloGroup.dataset.agent = name;
+      haloGroup.dataset.leader = String(name === graphLeaderName);
+      if (!haloRaf) {
+        haloRaf = requestAnimationFrame(haloLoop);
+      }
+    }
+
+    function unpinHalo() {
+      haloTargetName = null;
+      if (haloRaf) {
+        cancelAnimationFrame(haloRaf);
+        haloRaf = 0;
+      }
+      if (haloGroup) {
+        haloGroup.setAttribute("data-hidden", "1");
+      }
+    }
+
+    // ---------- Speaker event API ----------
+
+    // setSpeaker is the main public entry for live mode. On every
+    // speaker change we (a) play a transfer comet from the previous
+    // planet to the new one, (b) re-anchor the halo to the new
+    // planet, and (c) flip the glow class. The halo keeps orbiting
+    // the active planet until the next setSpeaker call.
     function setSpeaker(name) {
       if (!name) return;
-      if (prevSpeaker && prevSpeaker !== name) {
-        drawTransfer(prevSpeaker, name);
+      const isNewSpeaker = prevSpeaker && prevSpeaker !== name;
+      setActivePlanet(name);
+
+      if (isNewSpeaker) {
+        // Briefly hide the halo so the comet reads as "the floor
+        // transferring," then re-pin once the comet lands.
+        unpinHalo();
+        drawTransfer(prevSpeaker, name).then(() => {
+          pinHaloTo(name);
+        });
+      } else {
+        pinHaloTo(name);
       }
       prevSpeaker = name;
-      setActivePlanet(name);
     }
 
     function setStatus(text) {
@@ -286,15 +443,19 @@
     }
 
     function resize() {
-      // Force a relayout if the container size changed significantly.
-      // We just recompute orbits from current graphNodes keys.
-      // Not called automatically — caller can wire this to a ResizeObserver
-      // if they need it. For the current pages, the orbital math uses
-      // getBoundingClientRect at draw time, so labels stay correct even
-      // without an explicit resize pass.
+      // Orbital math uses getBoundingClientRect at draw time, so
+      // labels stay correct without an explicit resize pass. This
+      // stub is here in case callers want to force a relayout.
     }
 
     function destroy() {
+      unpinHalo();
+      if (haloGroup) {
+        haloGroup.remove();
+        haloGroup = null;
+        haloRing = null;
+        haloSatellite = null;
+      }
       clearOrbitChildren();
       if (graphSvg) graphSvg.innerHTML = "";
       if (sunCoreEl) {
@@ -307,15 +468,13 @@
       prevSpeaker = null;
     }
 
-    // Initial layout from options (if provided). The /demo page will
-    // call layout() later when the server emits its `agents` event.
+    // Initial layout from options.
     if (opts.leader || (Array.isArray(opts.agents) && opts.agents.length)) {
       layout(opts.leader || null, opts.agents || []);
     }
 
-    // Ambient mode: gently cycle the "active" glow around each planet
-    // in sequence so the landing hero still feels alive without any
-    // WebSocket input.
+    // Ambient mode: cycle the "active" glow around each planet in
+    // sequence so the landing hero feels alive without WS input.
     let ambientTimer = null;
     if (mode === "ambient") {
       const names = [];
@@ -325,15 +484,13 @@
         let idx = 0;
         const cycle = () => {
           const current = names[idx % names.length];
-          const next = names[(idx + 1) % names.length];
-          setActivePlanet(current);
-          setTimeout(() => {
-            drawTransfer(current, next);
-          }, 400);
+          setSpeaker(current);
           idx += 1;
         };
         cycle();
-        ambientTimer = setInterval(cycle, 3400);
+        ambientTimer = setInterval(cycle, 3600);
+      } else if (names.length === 1) {
+        setSpeaker(names[0]);
       }
     }
 
@@ -361,7 +518,6 @@
     };
   }
 
-  // Expose to both global and (if present) module.exports for tests.
   window.createSolarSystem = createSolarSystem;
   window.COSMIC_PLANET_PALETTE = PLANET_PALETTE;
 })();

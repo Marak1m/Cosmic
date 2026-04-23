@@ -46,8 +46,13 @@ const modelInputCharBudgetScale = new Map();
 const modelToolForceSupported = new Map();
 
 const OPENAI_API_KEY = normalizeApiKey(process.env.OPENAI_API_KEY);
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o";
-const PLANNER_MODEL = process.env.PLANNER_MODEL || "gpt-4.1";
+// Specialist agents: fast + cheap by default. gpt-5-family "reasoning"
+// models add 10-30s of chain-of-thought latency per turn that the user
+// feels as the run stalling between speakers. Per the COSMIC design,
+// only the Leader's heartbeat check-in and the Finalizer need deep
+// reasoning; everyone else just needs to be coherent and responsive.
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const PLANNER_MODEL = process.env.PLANNER_MODEL || "gpt-4o-mini";
 const LEADER_MODEL = process.env.LEADER_MODEL || "o1";
 // Fast, cheap model for the speaker-selection loop. Algorithm 1's
 // nomination fast-path already short-circuits ~50% of turns without
@@ -2124,7 +2129,45 @@ async function generateFinalAnswer(prompt, history, streamContext = null) {
   return ensureTerminateAtEnd((message.content || "").trim());
 }
 
+// Keep-alive pings so reverse proxies (Railway, Cloudflare, nginx) don't
+// drop the WebSocket during long o1/gpt-5 reasoning calls that may be
+// silent for 60-120s. The client ignores unknown event types, so `ping`
+// is effectively a no-op on the UI but resets the proxy idle timer.
+function startKeepAlive(ws, runId, intervalMs = 15000) {
+  const timer = setInterval(() => {
+    try {
+      if (ws && ws.readyState === 1) {
+        send(ws, { type: "ping", runId, ts: Date.now() });
+      }
+    } catch {
+      /* ignore */
+    }
+  }, intervalMs);
+  // Unref so the interval can't hold the process open on shutdown.
+  if (typeof timer.unref === "function") timer.unref();
+  return () => clearInterval(timer);
+}
+
 async function runConversationCore(finalPrompt, ws, runId) {
+  const stopKeepAlive = startKeepAlive(ws, runId, 15000);
+  try {
+    await runConversationCoreInner(finalPrompt, ws, runId);
+  } catch (error) {
+    console.error("[runConversationCore] unhandled error:", error);
+    // Always emit a terminal event — client is hung otherwise.
+    send(ws, {
+      type: "error",
+      runId,
+      message:
+        (error && error.message) ||
+        "The run failed unexpectedly. Please try again.",
+    });
+  } finally {
+    stopKeepAlive();
+  }
+}
+
+async function runConversationCoreInner(finalPrompt, ws, runId) {
   if (!SERPER_API_KEY && promptNeedsWebSearch(finalPrompt)) {
     send(ws, {
       type: "status",
@@ -2228,8 +2271,17 @@ async function runConversationCore(finalPrompt, ws, runId) {
     const nextSpeaker = allAgents.find((a) => a.name === ssa.chosen);
 
     if (!nextSpeaker) {
-      send(ws, { type: "error", message: "No valid speaker found.", runId });
-      break;
+      // SSA returned a name that isn't in the crew. Don't silently break —
+      // that's what caused the "status flips back to connected, no final"
+      // stall. Surface a status line and finalize with whatever context
+      // we have so the user gets a terminal message.
+      send(ws, {
+        type: "status",
+        runId,
+        message: `SSA picked an unknown agent (${ssa && ssa.chosen}); finalizing with current context.`,
+      });
+      await runFinalization("SSA selected an unknown agent; finalizing with available context.");
+      return;
     }
 
     send(ws, {
