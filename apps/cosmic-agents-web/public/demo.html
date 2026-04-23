@@ -41,13 +41,17 @@
     </header>
 
     <main class="demo-main" id="demo-main">
-      <!-- Pre-launch: the whole page is the prompt form on top of the
-           cosmic backdrop. After submit, body.mission-mode hides this. -->
-      <section class="hero demo-hero prelaunch-only">
-        <div class="hero-copy">
-          <p class="eyebrow">Realtime demo</p>
-          <h1>Launch a crew and watch them converge.</h1>
-          <p class="lead">
+      <!-- Pre-launch: single-column, centered. Heading first, form
+           below. The old two-column layout caused long words in the
+           heading ("converge") to overflow the left column and paint
+           under the prompt form; stacking vertically eliminates the
+           intersection entirely. After submit, body.mission-mode hides
+           this and the solar/rail grid takes over. -->
+      <section class="demo-hero prelaunch-only">
+        <div class="demo-hero-copy">
+          <p class="eyebrow eyebrow-center">Realtime demo</p>
+          <h1 class="demo-hero-title">Launch a crew and watch them converge.</h1>
+          <p class="lead lead-center">
             The planner spins up to five specialists plus a Leader. A custom
             speaker selector chooses who speaks next while memory stays shared
             and bounded.

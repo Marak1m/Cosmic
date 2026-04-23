@@ -211,7 +211,8 @@ main {
 }
 
 /* =========================================================
-   HERO
+   HERO — default two-column layout (used by pages that still
+   pair copy with a figure, e.g. the How-it-works page).
    ========================================================= */
 .hero {
   display: grid;
@@ -228,10 +229,86 @@ main {
 
 .hero-copy {
   max-width: 580px;
+  min-width: 0; /* let long words wrap inside the grid cell */
+}
+
+.hero-copy h1,
+.hero-copy p {
+  /* Ensure long words break instead of overflowing the column and
+     painting underneath the adjacent figure panel. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .hero-visual {
   min-width: 0;
+}
+
+/* =========================================================
+   HERO — single-column centered variant (landing page).
+   This is the minimalist layout: headline is the whole page
+   above the fold, no side figure. Long words have the full
+   content width to wrap into.
+   ========================================================= */
+.landing-main {
+  padding: clamp(56px, 10vh, 120px) clamp(18px, 4.5vw, 64px) 88px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  max-width: 1200px;
+  margin: 0 auto;
+  min-height: calc(100vh - 68px);
+  box-sizing: border-box;
+}
+
+.hero-center {
+  max-width: 880px;
+  margin: 0 auto;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+}
+
+.hero-center .hero-title {
+  font-family: var(--display);
+  font-size: clamp(2.4rem, 5vw, 4.6rem);
+  font-weight: 800;
+  margin: 0 0 22px;
+  line-height: 1.05;
+  letter-spacing: -0.025em;
+  background: linear-gradient(140deg, #eaeefc 0%, var(--violet) 48%, var(--cyan) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 18ch;
+}
+
+.eyebrow-center {
+  justify-content: center;
+  margin-bottom: 22px;
+}
+
+.lead-center {
+  margin: 0 0 34px;
+  max-width: 640px;
+}
+
+.hero-actions-center {
+  justify-content: center;
+  margin-bottom: 28px;
+}
+
+.hero-mantra-center {
+  max-width: 580px;
+  margin: 0;
+}
+
+.footer-minimal {
+  padding: 0 clamp(18px, 6vw, 72px) 36px;
 }
 
 .eyebrow {
