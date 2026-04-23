@@ -393,12 +393,20 @@ h1 {
    stays dominant.
    ========================================================= */
 .solar-system.landing-solar {
-  height: 360px;
+  /* Needs to comfortably fit 4 planets + labels around a Leader core,
+     with the outer orbit staying clear of the panel edge. */
+  height: 460px;
 }
 
 @media (max-width: 820px) {
   .solar-system.landing-solar {
-    height: 280px;
+    height: 360px;
+  }
+}
+
+@media (max-width: 520px) {
+  .solar-system.landing-solar {
+    height: 300px;
   }
 }
 
