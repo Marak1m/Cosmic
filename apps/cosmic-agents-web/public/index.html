@@ -15,6 +15,7 @@
       rel="stylesheet"
     />
     <link rel="stylesheet" href="landing.css" />
+    <link rel="stylesheet" href="solar.css" />
   </head>
   <body>
     <div class="space" aria-hidden="true">
@@ -53,42 +54,18 @@
           <div class="orbit-card">
             <div class="orbit-title">
               <span class="pill">Live topology</span>
-              <span class="mono">Leader + SSA + Shared_Memory</span>
+              <span class="mono">Leader + specialists in orbit</span>
             </div>
 
-            <div class="flow-stage" id="flow-stage" aria-label="Animated agent network">
-              <svg class="flow-lines" aria-hidden="true"></svg>
-
-              <div class="flow-node leader" data-agent="Leader" style="--x: 50%; --y: 14%;">Leader</div>
-              <div
-                class="flow-node selector"
-                data-agent="Speaker_Selector"
-                style="--x: 50%; --y: 50%;"
-              >
-                Speaker_Selector
-              </div>
-
-              <div class="flow-node agent" data-agent="Research_Specialist" style="--x: 24%; --y: 34%;">
-                Research_Specialist
-              </div>
-              <div class="flow-node agent" data-agent="Domain_Specialist" style="--x: 76%; --y: 34%;">
-                Domain_Specialist
-              </div>
-              <div class="flow-node agent" data-agent="Quality_Reviewer" style="--x: 24%; --y: 66%;">
-                Quality_Reviewer
-              </div>
-              <div class="flow-node agent" data-agent="Implementation_Specialist" style="--x: 76%; --y: 66%;">
-                Implementation_Specialist
-              </div>
-
-              <div class="flow-node memory" data-agent="Shared_Memory" style="--x: 50%; --y: 86%;">
-                Shared_Memory
-              </div>
-            </div>
+            <div
+              class="solar-system landing-solar"
+              id="landing-solar"
+              aria-label="Animated multi-agent solar system"
+            ></div>
 
             <div class="orbit-caption">
               <div class="mono" id="orbit-caption">
-                SSA routes turns. Memory broadcasts updates. The Leader keeps the crew converging.
+                One Leader. Many specialists. One converged answer.
               </div>
             </div>
           </div>
@@ -167,6 +144,7 @@
         });
       })();
     </script>
+    <script src="solar.js"></script>
     <script src="landing.js"></script>
   </body>
 </html>

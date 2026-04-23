@@ -49,7 +49,13 @@ const OPENAI_API_KEY = normalizeApiKey(process.env.OPENAI_API_KEY);
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o";
 const PLANNER_MODEL = process.env.PLANNER_MODEL || "gpt-4.1";
 const LEADER_MODEL = process.env.LEADER_MODEL || "o1";
-const SELECTOR_MODEL = process.env.SELECTOR_MODEL || "o1";
+// Fast, cheap model for the speaker-selection loop. Algorithm 1's
+// nomination fast-path already short-circuits ~50% of turns without
+// a model call; o1 on the remaining turns added 10-30s of wall-clock
+// latency per step. gpt-4o-mini gets us sub-2s selection without
+// materially changing which agent is chosen. Override with env if
+// you want to A/B against o1 / gpt-5-family.
+const SELECTOR_MODEL = process.env.SELECTOR_MODEL || "gpt-4o-mini";
 const FINALIZER_MODEL = process.env.FINALIZER_MODEL || "o1";
 const ENABLE_PROMPT_OPTIMIZER = normalizeBoolean(process.env.ENABLE_PROMPT_OPTIMIZER);
 const OPTIMIZER_MODEL = process.env.OPTIMIZER_MODEL || OPENAI_MODEL;
