@@ -24,18 +24,19 @@
 
 .how-title {
   font-family: var(--display);
-  font-size: clamp(2rem, 3.6vw, 3.2rem);
+  font-size: clamp(1.95rem, 3.4vw, 3rem);
   font-weight: 800;
-  margin: 0 0 20px;
-  line-height: 1.08;
-  letter-spacing: -0.02em;
+  margin: 0 0 24px;
+  line-height: 1.2;
+  letter-spacing: -0.012em;
   background: linear-gradient(140deg, #eaeefc 0%, var(--violet) 55%, var(--cyan) 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
   overflow-wrap: anywhere;
   word-break: break-word;
-  max-width: 22ch;
+  max-width: 24ch;
+  padding-bottom: 0.1em;
 }
 
 .how-figure {

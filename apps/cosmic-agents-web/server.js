@@ -46,20 +46,40 @@ const modelInputCharBudgetScale = new Map();
 const modelToolForceSupported = new Map();
 
 const OPENAI_API_KEY = normalizeApiKey(process.env.OPENAI_API_KEY);
+// OpenRouter is OpenAI-API-compatible but gives us runtime access to
+// Anthropic, Google, DeepSeek, Meta, Mistral etc. through the same
+// chat/completions endpoint. When OPENROUTER_API_KEY is set, every
+// call in callOpenAIChatRaw routes there instead of api.openai.com;
+// model strings become provider-prefixed ("openai/gpt-4o-mini",
+// "anthropic/claude-3.5-sonnet", "google/gemini-2.0-flash-exp", ...).
+// Falls back silently to OpenAI if only OPENAI_API_KEY is configured.
+const OPENROUTER_API_KEY = normalizeApiKey(process.env.OPENROUTER_API_KEY);
+const USE_OPENROUTER = OPENROUTER_API_KEY.length > 0;
+const OPENROUTER_REFERER =
+  process.env.OPENROUTER_REFERER || "https://cosmic-agents.com";
+const OPENROUTER_TITLE = process.env.OPENROUTER_TITLE || "Cosmic Agents";
 // Specialist agents: fast + cheap by default. gpt-5-family "reasoning"
 // models add 10-30s of chain-of-thought latency per turn that the user
 // feels as the run stalling between speakers. Per the COSMIC design,
 // only the Leader's heartbeat check-in and the Finalizer need deep
 // reasoning; everyone else just needs to be coherent and responsive.
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.4-mini";
-const PLANNER_MODEL = process.env.PLANNER_MODEL || "gpt-5.4-mini";
+// Default model IDs are OpenRouter-prefixed ("openai/gpt-4o-mini"
+// etc.) so a fresh .env pointed at OpenRouter works out of the box.
+// If OPENROUTER_API_KEY is NOT set, we strip the "provider/" prefix
+// automatically below before sending to api.openai.com, so the same
+// defaults also work against raw OpenAI with just OPENAI_API_KEY.
+const DEFAULT_SPECIALIST_MODEL = USE_OPENROUTER
+  ? "openai/gpt-4o-mini"
+  : "gpt-4o-mini";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || DEFAULT_SPECIALIST_MODEL;
+const PLANNER_MODEL = process.env.PLANNER_MODEL || DEFAULT_SPECIALIST_MODEL;
 // LEADER_MODEL is the "careful reasoning" brand. We used to route
 // every Leader-related call through it (task brief, heartbeat,
 // every conversational Leader turn), which added 20-60s per run
 // to paths that didn't need deep reasoning. Now it's used ONLY as
 // the default for HEARTBEAT_MODEL below — the single o1 call per
 // COSMIC_T_LEADER turns. The finalizer stays on FINALIZER_MODEL.
-const LEADER_MODEL = process.env.LEADER_MODEL || "o1";
+const LEADER_MODEL = process.env.LEADER_MODEL || (USE_OPENROUTER ? "openai/o1" : "o1");
 // Conversational Leader turns (non-heartbeat). Picks up the Leader's
 // voice for coordination, nominations, and constraint-checking during
 // the main loop. gpt-5.4-mini is plenty here: the decisions are local
@@ -80,7 +100,11 @@ const HEARTBEAT_MODEL = process.env.HEARTBEAT_MODEL || LEADER_MODEL;
 // latency per step. gpt-5.4-mini gets us sub-2s selection without
 // materially changing which agent is chosen. Override with env if
 // you want to A/B against o1 / gpt-5-family.
-const SELECTOR_MODEL = process.env.SELECTOR_MODEL || "gpt-5.4-mini";
+// Selector is the highest-frequency call per run (once per non-
+// nomination turn). Gemini 2.0 Flash on OpenRouter is ~2-3x faster
+// than gpt-4o-mini and cheaper for the tiny "pick a name" output.
+const SELECTOR_MODEL = process.env.SELECTOR_MODEL ||
+  (USE_OPENROUTER ? "google/gemini-2.0-flash-exp" : "gpt-4o-mini");
 // Finalizer produces the single user-facing answer. Was on o1, but
 // o1 kept starving its own visible output: it burns the max_tokens
 // budget on hidden reasoning tokens and emits bare "TERMINATE" (or
@@ -88,7 +112,13 @@ const SELECTOR_MODEL = process.env.SELECTOR_MODEL || "gpt-5.4-mini";
 // answer from memory. gpt-5.4 has a much better visible/reasoning
 // token ratio for extract-and-arrange synthesis — which is exactly
 // what the finalizer does. Override to o1 if you want to A/B.
-const FINALIZER_MODEL = process.env.FINALIZER_MODEL || "gpt-5.4";
+// Finalizer does extract-and-arrange synthesis across every
+// specialist's research. Claude 3.5 Sonnet consistently delivers
+// the strongest structured-long-form output for this shape, and
+// unlike o1 it doesn't burn the token budget on hidden reasoning.
+// On raw OpenAI we fall back to gpt-4o.
+const FINALIZER_MODEL = process.env.FINALIZER_MODEL ||
+  (USE_OPENROUTER ? "anthropic/claude-3.5-sonnet" : "gpt-4o");
 const ENABLE_PROMPT_OPTIMIZER = normalizeBoolean(process.env.ENABLE_PROMPT_OPTIMIZER);
 const OPTIMIZER_MODEL = process.env.OPTIMIZER_MODEL || OPENAI_MODEL;
 const ENABLE_USER_CLARIFICATIONS = normalizeBoolean(process.env.ENABLE_USER_CLARIFICATIONS);
@@ -99,6 +129,10 @@ const MAX_CLARIFICATION_QUESTIONS = Math.min(
 );
 const SERPER_API_KEY = normalizeApiKey(process.env.SERPER_API_KEY);
 const OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions";
+const OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions";
+const CHAT_URL = USE_OPENROUTER ? OPENROUTER_CHAT_URL : OPENAI_CHAT_URL;
+const CHAT_API_KEY = USE_OPENROUTER ? OPENROUTER_API_KEY : OPENAI_API_KEY;
+const CHAT_PROVIDER = USE_OPENROUTER ? "openrouter" : "openai";
 const ENABLE_STREAMING = normalizeBoolean(process.env.ENABLE_STREAMING ?? "true");
 const SEARCH_CACHE_TTL_MS = readIntEnv("SEARCH_CACHE_TTL_MS", 10 * 60 * 1000, { min: 0, max: 24 * 60 * 60 * 1000 });
 const SEARCH_CACHE_MAX_ENTRIES = readIntEnv("SEARCH_CACHE_MAX_ENTRIES", 200, { min: 0, max: 2000 });
@@ -110,7 +144,11 @@ const LEADER_NAME = "Leader";
 
 // COSMIC coordination hyperparameters (see COSMIC paper §III)
 const COSMIC_N = readIntEnv("COSMIC_MEMORY_N", 10, { min: 4, max: 40 });              // rolling window size N
-const COSMIC_T_LEADER = readIntEnv("LEADER_CHECKIN_INTERVAL", 7, { min: 3, max: 20 }); // T_leader heartbeat
+// Default 5 (was 7): on short runs (≤6 turns, e.g. single-pass
+// research tasks) a heartbeat at 7 never fires and the UI panel
+// sits at "No check-in yet" even on successful runs. 5 guarantees
+// at least one heartbeat on most real sessions.
+const COSMIC_T_LEADER = readIntEnv("LEADER_CHECKIN_INTERVAL", 5, { min: 3, max: 20 }); // T_leader heartbeat
 const COSMIC_THETA_H = Number(process.env.COSMIC_THETA_H || 0.8);                      // consistency threshold
 const COSMIC_EPS_C = Number(process.env.COSMIC_EPS_C || 0.1);                          // coverage stability eps
 const COSMIC_EPS_H = Number(process.env.COSMIC_EPS_H || 0.1);                          // consistency stability eps
@@ -176,12 +214,21 @@ const AGENT_NAME_POOL = [
   "Agent_E",
 ];
 
+// Strip any "provider/" OpenRouter prefix so model-family detection
+// works identically whether the model is "o1" or "openai/o1",
+// "gpt-5-mini" or "openai/gpt-5-mini".
+function stripProviderPrefix(value) {
+  const raw = String(value || "").trim();
+  const slash = raw.indexOf("/");
+  return slash >= 0 ? raw.slice(slash + 1) : raw;
+}
+
 function isO1Model(value) {
-  return /^o1($|-)/i.test(String(value || "").trim());
+  return /^o1($|-)/i.test(stripProviderPrefix(value));
 }
 
 function isGpt5FamilyModel(value) {
-  return /^gpt-5([-.]|$)/i.test(String(value || "").trim());
+  return /^gpt-5([-.]|$)/i.test(stripProviderPrefix(value));
 }
 
 function estimateMessageChars(message) {
@@ -239,9 +286,13 @@ function trimMessagesToMaxChars(messages, maxChars) {
   return [...pinned, ...kept];
 }
 
-if (!OPENAI_API_KEY || OPENAI_API_KEY.length < 20) {
+if (USE_OPENROUTER) {
+  console.log(
+    `OPENROUTER_API_KEY loaded (length ${OPENROUTER_API_KEY.length}, last4 ${OPENROUTER_API_KEY.slice(-4)})`
+  );
+} else if (!OPENAI_API_KEY || OPENAI_API_KEY.length < 20) {
   console.warn(
-    "OPENAI_API_KEY is missing or unusually short. Check your .env file."
+    "No provider key set. Provide OPENROUTER_API_KEY (recommended) or OPENAI_API_KEY in .env."
   );
 } else {
   console.log(
@@ -257,6 +308,9 @@ if (!SERPER_API_KEY || SERPER_API_KEY.length < 10) {
   );
 }
 
+console.log(
+  `Chat provider: ${CHAT_PROVIDER} (${CHAT_URL})`
+);
 console.log(
   `Models: OPENAI_MODEL=${OPENAI_MODEL} | PLANNER_MODEL=${PLANNER_MODEL} | OPTIMIZER_MODEL=${OPTIMIZER_MODEL} (enabled=${ENABLE_PROMPT_OPTIMIZER}) | CLARIFIER_MODEL=${CLARIFIER_MODEL} (enabled=${ENABLE_USER_CLARIFICATIONS}, max_q=${MAX_CLARIFICATION_QUESTIONS}) | LEADER_MODEL=${LEADER_MODEL} | LEADER_CHAT_MODEL=${LEADER_CHAT_MODEL} | TASK_BRIEF_MODEL=${TASK_BRIEF_MODEL} | HEARTBEAT_MODEL=${HEARTBEAT_MODEL} | SELECTOR_MODEL=${SELECTOR_MODEL} | FINALIZER_MODEL=${FINALIZER_MODEL} | MAX_TURNS=${MAX_TURNS} | MEMORY_WINDOW=${MEMORY_WINDOW}`
 );
@@ -1226,12 +1280,34 @@ function safeJsonParse(text) {
   return JSON.parse(match[0]);
 }
 
+function buildChatHeaders() {
+  const headers = {
+    Authorization: `Bearer ${CHAT_API_KEY}`,
+    "Content-Type": "application/json",
+  };
+  if (USE_OPENROUTER) {
+    // OpenRouter uses these for rate-limit attribution and the
+    // public leaderboard; both are optional but recommended.
+    if (OPENROUTER_REFERER) headers["HTTP-Referer"] = OPENROUTER_REFERER;
+    if (OPENROUTER_TITLE) headers["X-Title"] = OPENROUTER_TITLE;
+  }
+  return headers;
+}
+
 async function callOpenAIChatRaw(messages, options = {}) {
-  if (!OPENAI_API_KEY) {
-    throw new Error("OPENAI_API_KEY is not set.");
+  if (!CHAT_API_KEY) {
+    throw new Error(
+      USE_OPENROUTER
+        ? "OPENROUTER_API_KEY is not set."
+        : "OPENAI_API_KEY is not set (or set OPENROUTER_API_KEY to use OpenRouter)."
+    );
   }
 
-  const model = options.model || OPENAI_MODEL;
+  // Accept "openai/gpt-4o-mini" style ids everywhere. When we're
+  // sending to raw OpenAI, strip the provider prefix so api.openai.com
+  // gets the bare model id it expects. OpenRouter accepts both.
+  const rawModel = options.model || OPENAI_MODEL;
+  const model = USE_OPENROUTER ? rawModel : stripProviderPrefix(rawModel);
   const maxTokens = options.max_completion_tokens ?? options.max_tokens ?? MAX_OUTPUT_TOKENS;
   const cachedTempSupport = modelTemperatureSupported.get(model);
   let omitTemperature =
@@ -1271,18 +1347,15 @@ async function callOpenAIChatRaw(messages, options = {}) {
   };
 
   const postChat = async (payload) => {
-    const response = await fetchFn(OPENAI_CHAT_URL, {
+    const response = await fetchFn(CHAT_URL, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
+      headers: buildChatHeaders(),
       body: JSON.stringify(payload),
     });
 
     const text = await response.text();
     if (!response.ok) {
-      const error = new Error(`OpenAI API error: ${response.status} ${text}`);
+      const error = new Error(`${CHAT_PROVIDER} API error: ${response.status} ${text}`);
       error.status = response.status;
       error.body = text;
       throw error;
@@ -1314,18 +1387,15 @@ async function callOpenAIChatRaw(messages, options = {}) {
   };
 
   const postChatStream = async (payload) => {
-    const response = await fetchFn(OPENAI_CHAT_URL, {
+    const response = await fetchFn(CHAT_URL, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
+      headers: buildChatHeaders(),
       body: JSON.stringify({ ...payload, stream: true }),
     });
 
     if (!response.ok) {
       const text = await response.text();
-      const error = new Error(`OpenAI API error: ${response.status} ${text}`);
+      const error = new Error(`${CHAT_PROVIDER} API error: ${response.status} ${text}`);
       error.status = response.status;
       error.body = text;
       throw error;
@@ -2342,6 +2412,21 @@ function buildFallbackFinalFromMemory(userPrompt, mem) {
 // TERMINATE or a sentence or two). Tuned for the observed failure
 // mode where o1 emits empty content; a legit short answer to a
 // trivial prompt would still clear 400 chars of actual text.
+// Pull subtask ids (g1, g2, ...) that a specialist's reply is
+// addressing. Matches: "Addressing g2:", "g2 — ", "subtask g3",
+// "**g4**", bare "g2:" at a line start. Avoids matching words like
+// "g20240101" by requiring a boundary after the digits.
+function extractSubtaskIds(text) {
+  const found = new Set();
+  if (!text) return found;
+  const re = /\bg([1-9]\d?)\b/gi;
+  let m;
+  while ((m = re.exec(String(text))) !== null) {
+    found.add("g" + m[1]);
+  }
+  return found;
+}
+
 function isFinalAnswerThin(text) {
   const stripped = String(text || "")
     .replace(/\s*TERMINATE\s*$/i, "")
@@ -2467,6 +2552,7 @@ async function runConversationCoreInner(finalPrompt, ws, runId) {
     send(ws, { type: "message_start", runId, id: finalMessageId, name: LEADER_NAME });
 
     let finalAnswer;
+    let finalizerError = null;
     try {
       finalAnswer = await generateFinalAnswer(finalPrompt, mem, {
         ws,
@@ -2475,24 +2561,32 @@ async function runConversationCoreInner(finalPrompt, ws, runId) {
       });
     } catch (err) {
       console.error("[runFinalization] generateFinalAnswer failed:", err);
+      finalizerError = err;
       finalAnswer = "TERMINATE"; // force fallback branch below
     }
 
-    // Safety net: if the finalizer came back thin (e.g. o1 burned its
-    // entire token cap on hidden reasoning and emitted nothing), don't
-    // ship the user a bare "TERMINATE". Stitch the specialists' own
-    // research into a structured answer so their work reaches the user.
+    // Safety net: if the finalizer came back thin (e.g. a reasoning
+    // model burned its entire token cap on hidden reasoning and
+    // emitted nothing), don't ship the user a bare "TERMINATE". Stitch
+    // the specialists' own research into a structured answer.
     if (isFinalAnswerThin(finalAnswer)) {
+      // Surface WHY so the fallback isn't silent anymore — was hiding
+      // real issues (unknown model id, 404 from provider, etc.).
+      const cause = finalizerError
+        ? `Finalizer failed (${finalizerError.status || "no status"}): ${
+            String(finalizerError.body || finalizerError.message || "").slice(0, 240)
+          }`
+        : `Finalizer (${FINALIZER_MODEL}) returned empty output. Check FINALIZER_MAX_OUTPUT_TOKENS and whether the model id is valid on ${CHAT_PROVIDER}.`;
+      console.warn("[runFinalization] " + cause);
+      send(ws, { type: "status", runId, message: cause });
+
       const fallback = buildFallbackFinalFromMemory(finalPrompt, mem);
       if (fallback) {
-        console.warn(
-          "[runFinalization] finalizer output was thin; using deterministic fallback."
-        );
         send(ws, {
           type: "status",
           runId,
           message:
-            "Final synthesis was empty; composing answer directly from specialist research.",
+            "Composing answer directly from specialist research while the synthesis model is debugged.",
         });
         finalAnswer = fallback;
       }
@@ -2616,6 +2710,35 @@ async function runConversationCoreInner(finalPrompt, ws, runId) {
       turn: mem.full.length,
     });
     send(ws, { type: "message", runId, id: messageId, name: nextSpeaker.name, content: reply });
+
+    // Optimistic subtask progress: if a specialist references a gN
+    // subtask assigned to them (e.g., "Addressing g2:"), mark it
+    // complete in the UI now instead of waiting for the next heartbeat.
+    // The heartbeat remains the authoritative source and will overwrite
+    // this if the Leader disagrees at the next check-in.
+    if (
+      nextSpeaker.name !== LEADER_NAME &&
+      Array.isArray(brief.subtasks) &&
+      brief.subtasks.length
+    ) {
+      const mentioned = extractSubtaskIds(reply);
+      if (mentioned.size) {
+        const optimistic = {};
+        for (const sub of brief.subtasks) {
+          if (sub.assignee === nextSpeaker.name && mentioned.has(sub.id)) {
+            optimistic[sub.id] = "complete";
+          }
+        }
+        if (Object.keys(optimistic).length) {
+          send(ws, {
+            type: "subtask_update",
+            runId,
+            statuses: optimistic,
+            source: "specialist_reference",
+          });
+        }
+      }
+    }
 
     if (
       nextSpeaker.name === LEADER_NAME &&
