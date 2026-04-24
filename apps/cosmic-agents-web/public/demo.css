@@ -390,20 +390,19 @@ body.mission-mode .prelaunch-only {
 
 .demo-hero-title {
   font-family: var(--display);
-  font-size: clamp(2.2rem, 4.4vw, 3.8rem);
+  font-size: clamp(2.1rem, 4vw, 3.6rem);
   font-weight: 800;
-  margin: 0 0 20px;
-  line-height: 1.06;
-  letter-spacing: -0.02em;
+  margin: 0 auto 26px;
+  line-height: 1.18;
+  letter-spacing: -0.015em;
   background: linear-gradient(140deg, #eaeefc 0%, var(--violet) 50%, var(--cyan) 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
   overflow-wrap: anywhere;
   word-break: break-word;
-  max-width: 20ch;
-  margin-left: auto;
-  margin-right: auto;
+  max-width: 22ch;
+  padding-bottom: 0.1em;
 }
 
 .demo-hero .prompt-form {

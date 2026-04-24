@@ -273,18 +273,23 @@ main {
 
 .hero-center .hero-title {
   font-family: var(--display);
-  font-size: clamp(2.4rem, 5vw, 4.6rem);
+  /* Softer top size (4.2rem instead of 4.6rem) + roomier line-height
+     so stacked lines don't visually collide with descenders on the
+     line above. The display-tight look still reads, but letters and
+     lines breathe. */
+  font-size: clamp(2.3rem, 4.6vw, 4.2rem);
   font-weight: 800;
-  margin: 0 0 22px;
-  line-height: 1.05;
-  letter-spacing: -0.025em;
+  margin: 0 0 28px;
+  line-height: 1.18;
+  letter-spacing: -0.018em;
   background: linear-gradient(140deg, #eaeefc 0%, var(--violet) 48%, var(--cyan) 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
   overflow-wrap: anywhere;
   word-break: break-word;
-  max-width: 18ch;
+  max-width: 20ch;
+  padding-bottom: 0.1em; /* stop -webkit-background-clip from cropping descenders */
 }
 
 .eyebrow-center {
@@ -335,15 +340,16 @@ main {
 
 h1 {
   font-family: var(--display);
-  font-size: clamp(2.6rem, 4.2vw, 4.8rem);
+  font-size: clamp(2.4rem, 4vw, 4.4rem);
   font-weight: 800;
-  margin: 0 0 22px;
-  line-height: 1.03;
-  letter-spacing: -0.025em;
+  margin: 0 0 26px;
+  line-height: 1.16;
+  letter-spacing: -0.018em;
   background: linear-gradient(140deg, #eaeefc 0%, var(--violet) 48%, var(--cyan) 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
+  padding-bottom: 0.08em;
 }
 
 .lead {
